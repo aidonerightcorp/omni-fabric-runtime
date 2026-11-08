@@ -1,0 +1,202 @@
+{
+  "grid_id": "omni_fabric_adaptive_grid",
+  "generation": 1,
+  "default_regime": "balanced_adaptive",
+  "axes": [
+    {
+      "name": "lease_ttl_seconds",
+      "kind": "integer_range",
+      "low": 30,
+      "high": 600,
+      "step": 30
+    },
+    {
+      "name": "max_retry_epochs",
+      "kind": "integer_range",
+      "low": 2,
+      "high": 8,
+      "step": 1
+    },
+    {
+      "name": "maker_checker_quorum",
+      "kind": "integer_range",
+      "low": 2,
+      "high": 4,
+      "step": 1
+    },
+    {
+      "name": "resume_packet_byte_cap",
+      "kind": "integer_range",
+      "low": 220,
+      "high": 520,
+      "step": 30
+    },
+    {
+      "name": "trivial_prompt_char_cap",
+      "kind": "integer_range",
+      "low": 16,
+      "high": 64,
+      "step": 8
+    },
+    {
+      "name": "structured_output_token_floor",
+      "kind": "integer_range",
+      "low": 256,
+      "high": 1024,
+      "step": 128
+    },
+    {
+      "name": "exploration_strategy",
+      "kind": "choice",
+      "choices": [
+        "grid_search",
+        "latin_maximin",
+        "ucb_surrogate",
+        "successive_halving"
+      ]
+    },
+    {
+      "name": "canary_traffic_permille",
+      "kind": "integer_range",
+      "low": 50,
+      "high": 250,
+      "step": 50
+    },
+    {
+      "name": "boil_down_min_trace_support",
+      "kind": "integer_range",
+      "low": 2,
+      "high": 12,
+      "step": 2
+    },
+    {
+      "name": "micro_feature_buckets",
+      "kind": "integer_range",
+      "low": 32,
+      "high": 256,
+      "step": 32
+    },
+    {
+      "name": "micro_hidden_units",
+      "kind": "integer_range",
+      "low": 16,
+      "high": 96,
+      "step": 16
+    },
+    {
+      "name": "pruned_hidden_units",
+      "kind": "integer_range",
+      "low": 8,
+      "high": 48,
+      "step": 8
+    },
+    {
+      "name": "projected_subspace_dim",
+      "kind": "integer_range",
+      "low": 8,
+      "high": 32,
+      "step": 4
+    }
+  ],
+  "constraints": [
+    {
+      "left": "pruned_hidden_units",
+      "op": "le",
+      "right": "micro_hidden_units"
+    }
+  ],
+  "regimes": {
+    "interactive_low_latency": {
+      "lease_ttl_seconds": 60,
+      "max_retry_epochs": 3,
+      "maker_checker_quorum": 2,
+      "resume_packet_byte_cap": 280,
+      "trivial_prompt_char_cap": 24,
+      "structured_output_token_floor": 384,
+      "exploration_strategy": "ucb_surrogate",
+      "canary_traffic_permille": 100,
+      "boil_down_min_trace_support": 2,
+      "micro_feature_buckets": 64,
+      "micro_hidden_units": 32,
+      "pruned_hidden_units": 16,
+      "projected_subspace_dim": 16
+    },
+    "balanced_adaptive": {
+      "lease_ttl_seconds": 180,
+      "max_retry_epochs": 4,
+      "maker_checker_quorum": 2,
+      "resume_packet_byte_cap": 340,
+      "trivial_prompt_char_cap": 32,
+      "structured_output_token_floor": 512,
+      "exploration_strategy": "ucb_surrogate",
+      "canary_traffic_permille": 100,
+      "boil_down_min_trace_support": 2,
+      "micro_feature_buckets": 96,
+      "micro_hidden_units": 48,
+      "pruned_hidden_units": 16,
+      "projected_subspace_dim": 16
+    },
+    "deep_swarm_campaign": {
+      "lease_ttl_seconds": 360,
+      "max_retry_epochs": 6,
+      "maker_checker_quorum": 2,
+      "resume_packet_byte_cap": 460,
+      "trivial_prompt_char_cap": 24,
+      "structured_output_token_floor": 768,
+      "exploration_strategy": "successive_halving",
+      "canary_traffic_permille": 150,
+      "boil_down_min_trace_support": 4,
+      "micro_feature_buckets": 128,
+      "micro_hidden_units": 64,
+      "pruned_hidden_units": 24,
+      "projected_subspace_dim": 20
+    }
+  },
+  "runtime_constants": {
+    "sqlite_busy_timeout_ms": 5000,
+    "fence_digest_char_len": 16,
+    "task_key_char_len": 10,
+    "pre_llm_context_char_cap": 260,
+    "rrf_rank_constant": 60,
+    "hybrid_search_default_limit": 8,
+    "hybrid_search_max_limit": 50,
+    "macro_dag_min_tasks": 3,
+    "macro_dag_max_tasks": 250,
+    "macro_dag_phase_count": 6,
+    "default_batch_proposals": 4,
+    "max_batch_proposals": 32,
+    "ucb_exploration_weight": 1.25,
+    "boundary_expand_steps": 1,
+    "canary_min_samples": 3,
+    "canary_rollback_margin": 0.15,
+    "canary_promote_margin": 0.05,
+    "permille_scale": 1000,
+    "ridge_regularization": 0.05,
+    "neural_train_steps": 45,
+    "neural_learning_rate": 0.04,
+    "nullspace_rank_tolerance": 0.0001,
+    "loopback_probe_timeout_ms": 180,
+    "upstream_http_timeout_sec": 6,
+    "default_local_runner_port": 11434,
+    "default_runner_ctx_tokens": 1024,
+    "default_budget_micro_units": 5000000,
+    "octal_owner_rw_mode": 384,
+    "percent_scale": 100.0,
+    "bytes_per_kib": 1024.0,
+    "ms_per_second": 1000.0,
+    "complex_prompt_char_threshold": 160,
+    "medium_prompt_char_threshold": 48,
+    "http_ok_min": 200,
+    "http_ok_max": 299,
+    "http_status_ok": 200,
+    "http_status_bad_request": 400,
+    "http_status_payment_required": 402,
+    "http_status_conflict": 409,
+    "pair_divisor": 2,
+    "ngram_span": 3,
+    "default_seed_offset": 17,
+    "default_hash_prime": 31,
+    "https_default_port": 443,
+    "eps_floor": 0.00000001
+  }
+}

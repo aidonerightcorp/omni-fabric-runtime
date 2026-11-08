@@ -1,0 +1,66 @@
+manifest_version: 2
+api_version: 1
+name: omni-fabric-runtime
+version: "0.2.0"
+kind: standalone
+description: "Environment-adaptive agent fabric runtime: SQLite WAL monotonic lease queue, distinct maker!=checker object cache with FTS5 RRF search, Macro-DAG workflow compiler, parameterized NodeGrid + RL canary optimizer, progressive 4-rung neural boil-down, loopback multi-agent swarm proxy, and optional remote Fabric sync."
+author: "aidonerightcorp"
+license: "MIT"
+homepage: "https://github.com/aidonerightcorp/omni-fabric-runtime"
+requires_hermes: ">=0.20.0"
+requires_env: []
+python_dependencies: []
+provides_tools:
+  - fabric_probe_and_configure
+  - fabric_task_queue
+  - fabric_object_store
+  - fabric_compile_workflow_dag
+  - fabric_grid_and_rl_optimize
+  - fabric_boil_down_and_edit
+  - fabric_swarm_proxy_control
+  - fabric_federated_sync
+provides_hooks:
+  - on_session_start
+  - pre_llm_call
+  - pre_verify
+  - post_api_request
+  - post_tool_call
+  - subagent_start
+  - subagent_stop
+  - kanban_task_claimed
+  - kanban_task_completed
+  - on_kanban_worker_stale_claim
+provides_middleware:
+  - llm_request
+config_schema:
+  setup_profile:
+    type: string
+    default: "auto"
+    description: "Environment profile (auto, stdlib_airgap, local_neural, local_runner_swarm, hybrid_fabric_sync, thin_remote_client)."
+  regime:
+    type: string
+    default: "balanced_adaptive"
+    description: "Active NodeGrid regime cell (interactive_low_latency, balanced_adaptive, deep_swarm_campaign)."
+  local_runner_url:
+    type: string
+    default: "http://127.0.0.1:11434"
+    description: "Optional loopback open-model runner base URL probed when local runner mode is active."
+  upstream_endpoint:
+    type: string
+    default: ""
+    description: "Optional remote Fabric base URL for hybrid_fabric_sync or thin_remote_client setups (blank keeps runtime local-only)."
+  default_visibility:
+    type: string
+    default: "local_only"
+    description: "Default visibility for staged Task Objects (local_only or sync_ready)."
+  enable_pre_verify_gate:
+    type: boolean
+    default: true
+    description: "Nudge turn completion when leased tasks edited workspace files without a fenced checkpoint."
+tags:
+  - durable-execution
+  - lease-fencing
+  - grid-optimization
+  - reinforcement-learning
+  - multi-agent-swarm
+  - neural-distillation
