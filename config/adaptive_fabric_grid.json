@@ -1,6 +1,6 @@
 {
   "grid_id": "omni_fabric_adaptive_grid",
-  "generation": 1,
+  "generation": 2,
   "default_regime": "balanced_adaptive",
   "axes": [
     {
@@ -96,6 +96,42 @@
       "low": 8,
       "high": 32,
       "step": 4
+    },
+    {
+      "name": "bundle_cardinality_k",
+      "kind": "integer_range",
+      "low": 1,
+      "high": 4,
+      "step": 1
+    },
+    {
+      "name": "dispatch_affinity_mode",
+      "kind": "choice",
+      "choices": [
+        "single_isolated",
+        "back_to_back_sequential",
+        "simultaneous_batched_pack",
+        "speculative_pipeline"
+      ]
+    },
+    {
+      "name": "attenuation_circuit_breaker_milli",
+      "kind": "integer_range",
+      "low": 300,
+      "high": 900,
+      "step": 50
+    },
+    {
+      "name": "lora_xs_subspace_rank",
+      "kind": "integer_range",
+      "low": 4,
+      "high": 16,
+      "step": 4
+    },
+    {
+      "name": "require_thinking_off_baseline_gate",
+      "kind": "boolean",
+      "default": true
     }
   ],
   "constraints": [
@@ -119,7 +155,12 @@
       "micro_feature_buckets": 64,
       "micro_hidden_units": 32,
       "pruned_hidden_units": 16,
-      "projected_subspace_dim": 16
+      "projected_subspace_dim": 16,
+      "bundle_cardinality_k": 2,
+      "dispatch_affinity_mode": "back_to_back_sequential",
+      "attenuation_circuit_breaker_milli": 700,
+      "lora_xs_subspace_rank": 8,
+      "require_thinking_off_baseline_gate": true
     },
     "balanced_adaptive": {
       "lease_ttl_seconds": 180,
@@ -134,7 +175,12 @@
       "micro_feature_buckets": 96,
       "micro_hidden_units": 48,
       "pruned_hidden_units": 16,
-      "projected_subspace_dim": 16
+      "projected_subspace_dim": 16,
+      "bundle_cardinality_k": 3,
+      "dispatch_affinity_mode": "back_to_back_sequential",
+      "attenuation_circuit_breaker_milli": 650,
+      "lora_xs_subspace_rank": 8,
+      "require_thinking_off_baseline_gate": true
     },
     "deep_swarm_campaign": {
       "lease_ttl_seconds": 360,
@@ -149,7 +195,12 @@
       "micro_feature_buckets": 128,
       "micro_hidden_units": 64,
       "pruned_hidden_units": 24,
-      "projected_subspace_dim": 20
+      "projected_subspace_dim": 20,
+      "bundle_cardinality_k": 4,
+      "dispatch_affinity_mode": "simultaneous_batched_pack",
+      "attenuation_circuit_breaker_milli": 600,
+      "lora_xs_subspace_rank": 8,
+      "require_thinking_off_baseline_gate": true
     }
   },
   "runtime_constants": {
@@ -197,6 +248,28 @@
     "default_seed_offset": 17,
     "default_hash_prime": 31,
     "https_default_port": 443,
-    "eps_floor": 0.00000001
+    "eps_floor": 0.00000001,
+    "bundle_min_k": 1,
+    "bundle_max_k": 4,
+    "default_step_confidence_milli": 900,
+    "full_confidence_milli": 1000,
+    "attenuation_round_digits": 6,
+    "kv_prefix_exact_match_ratio": 0.85,
+    "kv_capability_match_ratio": 0.55,
+    "kv_schema_pack_match_ratio": 0.45,
+    "kv_speculative_stage_ratio": 0.65,
+    "kv_disjoint_baseline_ratio": 0.1,
+    "ratio_round_digits": 4,
+    "coarse_granularity_max_tasks": 8,
+    "balanced_granularity_max_tasks": 36,
+    "float32_byte_width": 4,
+    "confound_eval_seed_count": 3,
+    "confound_seed_stride": 13,
+    "confound_mask_modulus": 4,
+    "confound_min_holdout_split_samples": 6,
+    "confound_min_gain_over_thinking_off": 0.05,
+    "power_iteration_steps": 24,
+    "trace_query_default_limit": 50,
+    "trace_query_max_limit": 500
   }
 }

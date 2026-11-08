@@ -1,10 +1,10 @@
-"""Hermes Agent unified adaptive plugin: omni-fabric-runtime.
+"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.3.0).
 
 Packages the complete local-to-federated agent fabric runtime behind 5 automatic
 environment setup profiles:
-1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network)
+1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), affinity bundle dispatch, attenuation-gated DAGs, and 256B LoRA-XS cartridges
 2. local_neural         - Unlocks NumPy/PyTorch multi-head micro-nets, 0-epoch SVD nullspace surgery, and Wanda trace channel pruning
-3. local_runner_swarm   - Unlocks loopback /v1/chat/completions + /swarm/* distilling proxy and schema-constrained local open models
+3. local_runner_swarm   - Unlocks loopback /v1/models + /v1/chat/completions + /swarm/* distilling proxy for Hermes subagents and GrokBot workers
 4. hybrid_fabric_sync   - Local SQLite WAL cell + selective sync of sync_ready objects & frontier tasks with upstream_endpoint
 5. thin_remote_client   - Ephemeral zero-disk container bridge to upstream_endpoint (/q/* and /mcp)
 """
@@ -20,7 +20,11 @@ from .boil_down_and_swarm import (
     FederatedFabricBridge,
     LoopbackSwarmProxyManager,
 )
-from .fabric_substrate import LocalAdaptiveFabricStore
+from .fabric_substrate import (
+    DISPATCH_AFFINITY_MODES,
+    REASONING_MODES,
+    LocalAdaptiveFabricStore,
+)
 from .grid_and_env import (
     SETUP_PROFILES,
     AdaptiveNodeGrid,
@@ -126,7 +130,7 @@ def register(ctx: Any) -> None:
     """Entry point invoked by Hermes PluginManager."""
     rt = OmniFabricPluginRuntime(ctx)
 
-    # ── 1. Eight Unified Tools ────────────────────────────────────────────
+    # ── 1. Nine Unified Tools ─────────────────────────────────────────────
 
     def _tool_probe_and_configure(args: Dict[str, Any], **_kw: Any) -> str:
         requested = args.get("setup_profile")
@@ -182,6 +186,12 @@ def register(ctx: Any) -> None:
                 contract_tag=str(args.get("contract_tag") or "v1"),
                 depends_on=args.get("depends_on"),
                 visibility=str(args.get("visibility") or rt._cfg("default_visibility", "local_only")),
+                prefix_signature=args.get("prefix_signature"),
+                capability_tag=args.get("capability_tag"),
+                tool_schema_tag=args.get("tool_schema_tag"),
+                origin_id=args.get("origin_id"),
+                step_confidence_milli=args.get("step_confidence_milli"),
+                regime=regime,
             )
             return json.dumps(res, sort_keys=True)
         if action == "claim":
@@ -193,6 +203,21 @@ def register(ctx: Any) -> None:
             )
             if res.get("ok"):
                 rt.uncheckpointed_leases.add(str(res["task_id"]))
+            return json.dumps(res, sort_keys=True)
+        if action == "claim_bundle":
+            res = rt.store.claim_bundle(
+                worker_id=str(args["worker_id"]),
+                bundle_size=args.get("bundle_size"),
+                dispatch_mode=args.get("dispatch_mode"),
+                namespace=args.get("namespace"),
+                preferred_prefix_signature=args.get("preferred_prefix_signature"),
+                preferred_capability_tag=args.get("preferred_capability_tag"),
+                preferred_tool_schema_tag=args.get("preferred_tool_schema_tag"),
+                regime=regime,
+            )
+            if res.get("ok"):
+                for item in res.get("tasks", []):
+                    rt.uncheckpointed_leases.add(str(item["task_id"]))
             return json.dumps(res, sort_keys=True)
         if action == "checkpoint":
             res = rt.store.checkpoint_task(
@@ -207,6 +232,9 @@ def register(ctx: Any) -> None:
             if res.get("ok"):
                 rt.uncheckpointed_leases.discard(str(args["task_id"]))
             return json.dumps(res, sort_keys=True)
+        if action == "inspect_task":
+            state = rt.store.get_task_state(str(args["task_id"]))
+            return json.dumps({"ok": state is not None, "task": state}, sort_keys=True)
         if action == "reclaim_stale":
             res = rt.store.reclaim_stale_leases(worker_id_filter=args.get("worker_id"))
             return json.dumps(res, sort_keys=True)
@@ -215,19 +243,27 @@ def register(ctx: Any) -> None:
     ctx.register_tool(
         name="fabric_task_queue",
         toolset="omni_fabric_runtime",
-        description="Monotonic CAS lease_epoch + HMAC fence_token task queue with topological depends_on DAG and crash-safe resume packets.",
+        description="Monotonic CAS lease_epoch + HMAC fence_token task queue with topological depends_on DAG, attenuation circuit-breaker, and crash-safe resume packets.",
         schema={
             "name": "fabric_task_queue",
-            "description": "Enqueue, claim, checkpoint, or reclaim fenced tasks.",
+            "description": "Enqueue, claim, checkpoint, inspect, or reclaim fenced tasks.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["enqueue", "claim", "checkpoint", "reclaim_stale"]},
+                    "action": {
+                        "type": "string",
+                        "enum": ["enqueue", "claim", "claim_bundle", "checkpoint", "inspect_task", "reclaim_stale"],
+                    },
                     "task_id": {"type": "string"},
                     "worker_id": {"type": "string"},
                     "namespace": {"type": "string"},
                     "operation": {"type": "string"},
                     "contract_tag": {"type": "string"},
+                    "prefix_signature": {"type": "string"},
+                    "capability_tag": {"type": "string"},
+                    "tool_schema_tag": {"type": "string"},
+                    "origin_id": {"type": "string"},
+                    "step_confidence_milli": {"type": "integer"},
                     "payload": {"type": "object"},
                     "depends_on": {"type": "array", "items": {"type": "string"}},
                     "lease_epoch": {"type": "integer"},
@@ -242,8 +278,110 @@ def register(ctx: Any) -> None:
         handler=_tool_task_queue,
     )
 
+    def _tool_claim_bundle(args: Dict[str, Any], **_kw: Any) -> str:
+        regime = rt.active_regime()
+        default_k = rt._cfg("bundle_cardinality_k", None)
+        default_mode = rt._cfg("dispatch_affinity_mode", None)
+        res = rt.store.claim_bundle(
+            worker_id=str(args["worker_id"]),
+            bundle_size=args.get("bundle_size", default_k),
+            dispatch_mode=args.get("dispatch_mode", default_mode),
+            namespace=args.get("namespace"),
+            preferred_prefix_signature=args.get("preferred_prefix_signature"),
+            preferred_capability_tag=args.get("preferred_capability_tag"),
+            preferred_tool_schema_tag=args.get("preferred_tool_schema_tag"),
+            regime=regime,
+        )
+        if res.get("ok"):
+            for item in res.get("tasks", []):
+                rt.uncheckpointed_leases.add(str(item["task_id"]))
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_claim_bundle",
+        toolset="omni_fabric_runtime",
+        description="Claim an atomic affinity-ordered bundle of 1..4 ready tasks (back_to_back_sequential, simultaneous_batched_pack, speculative_pipeline, or single_isolated) with KV-cache reuse estimates.",
+        schema={
+            "name": "fabric_claim_bundle",
+            "description": "Atomically lease 1..4 ready tasks grouped by shared prefix_signature, capability_tag, or compatible tool schema.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "worker_id": {"type": "string"},
+                    "bundle_size": {"type": "integer"},
+                    "dispatch_mode": {"type": "string", "enum": list(DISPATCH_AFFINITY_MODES)},
+                    "namespace": {"type": "string"},
+                    "preferred_prefix_signature": {"type": "string"},
+                    "preferred_capability_tag": {"type": "string"},
+                    "preferred_tool_schema_tag": {"type": "string"},
+                },
+                "required": ["worker_id"],
+            },
+        },
+        handler=_tool_claim_bundle,
+    )
+
     def _tool_object_store(args: Dict[str, Any], **_kw: Any) -> str:
         action = str(args.get("action") or "hybrid_search")
+        regime = rt.active_regime()
+        if action == "submit_result":
+            res = rt.store.submit_result(
+                task_id=str(args["task_id"]),
+                maker_id=str(args["maker_id"]),
+                checker_id=args.get("checker_id"),
+                namespace=str(args.get("namespace") or "default"),
+                contract_tag=str(args.get("contract_tag") or "v1"),
+                visibility=str(args.get("visibility") or rt._cfg("default_visibility", "local_only")),
+                title=str(args.get("title") or args["task_id"]),
+                summary_text=str(args.get("summary_text") or ""),
+                payload=dict(args.get("payload") or {}),
+                lease_epoch=args.get("lease_epoch"),
+                fence_token=args.get("fence_token"),
+                complete_task=bool(args.get("complete_task", False)),
+                input_text=str(args.get("input_text") or ""),
+                target_label=str(args.get("target_label") or ""),
+                prefix_signature=str(args.get("prefix_signature") or ""),
+                reasoning_mode=str(args.get("reasoning_mode") or "adaptive"),
+                thinking_tokens=int(args.get("thinking_tokens") or 0),
+                answer_tokens=int(args.get("answer_tokens") or 0),
+                latency_ms=float(args.get("latency_ms") or 0.0),
+                activation_norm_digest=str(args.get("activation_norm_digest") or ""),
+                attenuation_confidence_milli=args.get("attenuation_confidence_milli"),
+                seed_id=int(args.get("seed_id") or 0),
+                regime=regime,
+            )
+            if res.get("ok") and bool(args.get("complete_task", False)):
+                rt.uncheckpointed_leases.discard(str(args["task_id"]))
+            return json.dumps(res, sort_keys=True)
+        if action == "record_trace_envelope":
+            res = rt.store.record_trace_envelope(
+                namespace=str(args.get("namespace") or "default"),
+                task_id=str(args.get("task_id") or ""),
+                object_id=str(args.get("object_id") or ""),
+                worker_id=str(args.get("worker_id") or args.get("maker_id") or ""),
+                input_text=str(args.get("input_text") or ""),
+                target_label=str(args.get("target_label") or ""),
+                prefix_signature=str(args.get("prefix_signature") or ""),
+                reasoning_mode=str(args.get("reasoning_mode") or "adaptive"),
+                thinking_tokens=int(args.get("thinking_tokens") or 0),
+                answer_tokens=int(args.get("answer_tokens") or 0),
+                tokens_used=args.get("tokens_used"),
+                latency_ms=float(args.get("latency_ms") or 0.0),
+                activation_norm_digest=str(args.get("activation_norm_digest") or ""),
+                attenuation_confidence_milli=args.get("attenuation_confidence_milli"),
+                seed_id=int(args.get("seed_id") or 0),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "query_trace_envelopes":
+            items = rt.store.query_trace_envelopes(
+                namespace=args.get("namespace"),
+                reasoning_mode=args.get("reasoning_mode"),
+                prefix_signature=args.get("prefix_signature"),
+                task_id=args.get("task_id"),
+                seed_id=args.get("seed_id"),
+                limit=args.get("limit"),
+            )
+            return json.dumps({"ok": True, "count": len(items), "envelopes": items}, sort_keys=True)
         if action in ("stage", "promote_review"):
             res = rt.store.stage_or_promote_object(
                 task_id=str(args["task_id"]),
@@ -258,6 +396,8 @@ def register(ctx: Any) -> None:
                 payload=dict(args.get("payload") or {}),
                 valid_from=args.get("valid_from"),
                 valid_to=args.get("valid_to"),
+                attenuation_confidence_milli=args.get("attenuation_confidence_milli"),
+                regime=regime,
             )
             return json.dumps(res, sort_keys=True)
         if action == "lookup_reuse":
@@ -279,14 +419,25 @@ def register(ctx: Any) -> None:
     ctx.register_tool(
         name="fabric_object_store",
         toolset="omni_fabric_runtime",
-        description="Bitemporal maker!=checker Task Object store with 0-token reuse lookup, FTS5 RRF hybrid search, and unseen_only novelty filtering.",
+        description="Bitemporal maker!=checker Task Object store with enriched trace envelopes, independent attenuation reset, 0-token reuse lookup, and FTS5 RRF search.",
         schema={
             "name": "fabric_object_store",
-            "description": "Stage, independently promote, lookup 0-token reuse, or hybrid-search Task Objects.",
+            "description": "Stage, independently promote, submit enriched results/traces, lookup 0-token reuse, or hybrid-search Task Objects.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["stage", "promote_review", "lookup_reuse", "hybrid_search"]},
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "stage",
+                            "promote_review",
+                            "submit_result",
+                            "record_trace_envelope",
+                            "query_trace_envelopes",
+                            "lookup_reuse",
+                            "hybrid_search",
+                        ],
+                    },
                     "task_id": {"type": "string"},
                     "task_key": {"type": "string"},
                     "contract_tag": {"type": "string"},
@@ -297,6 +448,13 @@ def register(ctx: Any) -> None:
                     "title": {"type": "string"},
                     "summary_text": {"type": "string"},
                     "payload": {"type": "object"},
+                    "prefix_signature": {"type": "string"},
+                    "reasoning_mode": {"type": "string", "enum": list(REASONING_MODES)},
+                    "thinking_tokens": {"type": "integer"},
+                    "answer_tokens": {"type": "integer"},
+                    "activation_norm_digest": {"type": "string"},
+                    "attenuation_confidence_milli": {"type": "integer"},
+                    "seed_id": {"type": "integer"},
                     "query": {"type": "string"},
                     "unseen_only_for": {"type": "string"},
                     "limit": {"type": "integer"},
@@ -308,11 +466,16 @@ def register(ctx: Any) -> None:
     )
 
     def _tool_compile_workflow(args: Dict[str, Any], **_kw: Any) -> str:
-        res = rt.store.compile_workflow_dag(
+        res = rt.store.compile_macro_dag(
             workflow_id=str(args["workflow_id"]),
             goal=str(args["goal"]),
-            target_task_count=int(args.get("target_task_count") or rt.grid.runtime_constants["macro_dag_phase_count"]),
+            target_task_count=int(
+                args.get("target_task_count") or rt.grid.runtime_constants["macro_dag_phase_count"]
+            ),
             namespace=str(args.get("namespace") or "macro_workflow"),
+            origin_id=args.get("origin_id"),
+            step_confidence_milli=args.get("step_confidence_milli"),
+            regime=rt.active_regime(),
             enqueue_immediately=bool(args.get("enqueue_immediately", True)),
         )
         return json.dumps(res, sort_keys=True)
@@ -320,10 +483,10 @@ def register(ctx: Any) -> None:
     ctx.register_tool(
         name="fabric_compile_workflow_dag",
         toolset="omni_fabric_runtime",
-        description="Compile macro objectives or occupational role workflows (3..250 tasks across 6 universal action phases) into dependency-ordered fenced tasks.",
+        description="Compile macro objectives or benchmark decompositions (3..250 tasks across 6 phases) with width/depth/granularity tracking and early attenuation circuit-breaker.",
         schema={
             "name": "fabric_compile_workflow_dag",
-            "description": "Decompose a goal into a topological 6-phase fenced task DAG.",
+            "description": "Decompose a goal into a topological 6-phase fenced task DAG with cumulative attenuation tracking.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -331,6 +494,8 @@ def register(ctx: Any) -> None:
                     "goal": {"type": "string"},
                     "target_task_count": {"type": "integer"},
                     "namespace": {"type": "string"},
+                    "origin_id": {"type": "string"},
+                    "step_confidence_milli": {"type": "integer"},
                     "enqueue_immediately": {"type": "boolean"},
                 },
                 "required": ["workflow_id", "goal"],
@@ -368,7 +533,7 @@ def register(ctx: Any) -> None:
         res = rt.store.canary_policy_step(
             policy_id=str(args.get("policy_id") or args.get("campaign_id") or "default_policy"),
             mode=str(args.get("mode") or "select"),
-            baseline_arm=str(args.get("baseline_arm") or "reuse_then_verify"),
+            baseline_arm=str(args.get("baseline_arm") or "reuse_then_check"),
             canary_arm=str(args.get("canary_arm") or "boil_down_micro_net"),
             used_canary=bool(args.get("used_canary", False)),
             reward=float(args.get("reward") or 0.0),
@@ -386,7 +551,10 @@ def register(ctx: Any) -> None:
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["define_space", "propose_batch", "record_outcome", "canary_policy_step"]},
+                    "action": {
+                        "type": "string",
+                        "enum": ["define_space", "propose_batch", "record_outcome", "canary_policy_step"],
+                    },
                     "campaign_id": {"type": "string"},
                     "axes": {"type": "array", "items": {"type": "object"}},
                     "constraints": {"type": "array", "items": {"type": "object"}},
@@ -410,6 +578,9 @@ def register(ctx: Any) -> None:
     def _tool_boil_down(args: Dict[str, Any], **_kw: Any) -> str:
         action = str(args.get("action") or "compile_stdlib")
         ns = str(args.get("namespace") or "default")
+        ddir = rt.data_dir()
+        models_dir = (ddir / "models") if ddir else None
+
         if action == "record_trace":
             rt.store.record_execution_trace(
                 namespace=ns,
@@ -422,23 +593,49 @@ def register(ctx: Any) -> None:
         if action == "predict":
             res = rt.boil_engine.predict_micro_router(ns, str(args["input_text"]))
             return json.dumps(res, sort_keys=True)
+        if action == "compile_lora_xs":
+            res = rt.boil_engine.compile_lora_xs_cartridge(
+                namespace=ns,
+                samples=args.get("samples"),
+                holdout_samples=args.get("holdout_samples"),
+                subspace_rank=args.get("subspace_rank"),
+                null_edit=bool(args.get("null_edit", False)),
+                enforce_thinking_off_gate=args.get("enforce_thinking_off_gate"),
+                export_dir=models_dir,
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "hot_swap_lora_xs":
+            res = rt.boil_engine.hot_swap_lora_xs_cartridge(
+                namespace=ns,
+                cartridge_b64=str(args["cartridge_b64"]),
+                labels=list(args.get("labels") or []),
+                subspace_rank=args.get("subspace_rank"),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
         if action in ("neural_prune_or_synthesize", "nullspace_surgery"):
             op = "nullspace_surgery" if action == "nullspace_surgery" else "wanda_prune"
-            ddir = rt.data_dir()
             res = rt.boil_engine.run_neural_surgery_or_pruning(
                 operation=op,
                 namespace=ns,
                 samples=args.get("samples"),
+                holdout_samples=args.get("holdout_samples"),
                 anchor_vectors=args.get("anchor_vectors"),
                 edit_vectors=args.get("edit_vectors"),
                 edit_targets=args.get("edit_targets"),
-                export_dir=(ddir / "models") if ddir else None,
+                null_edit=bool(args.get("null_edit", False)),
+                enforce_thinking_off_gate=args.get("enforce_thinking_off_gate"),
+                export_dir=models_dir,
                 regime=rt.active_regime(),
             )
             return json.dumps(res, sort_keys=True)
         res = rt.boil_engine.compile_stdlib_micro_router(
             namespace=ns,
             samples=args.get("samples"),
+            holdout_samples=args.get("holdout_samples"),
+            null_edit=bool(args.get("null_edit", False)),
+            enforce_thinking_off_gate=args.get("enforce_thinking_off_gate"),
             regime=rt.active_regime(),
         )
         return json.dumps(res, sort_keys=True)
@@ -446,22 +643,36 @@ def register(ctx: Any) -> None:
     ctx.register_tool(
         name="fabric_boil_down_and_edit",
         toolset="omni_fabric_runtime",
-        description="Compile traces into 0-token stdlib ReLU/ridge micro-routers, or run PyTorch Wanda channel pruning (-77% RAM) and 0-epoch SVD nullspace weight surgery.",
+        description="Compile traces into 0-token stdlib micro-routers, 256-byte LoRA-XS subspace cartridges, or Wanda/SVD nullspace edits gated against matched thinking=off baselines.",
         schema={
             "name": "fabric_boil_down_and_edit",
-            "description": "Progressive trace distillation, weight pruning, nullspace weight surgery, and 0-token inference.",
+            "description": "Progressive trace distillation, 256B LoRA-XS subspace cartridges, thinking=off confound gating, Wanda pruning, and nullspace surgery.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {
                         "type": "string",
-                        "enum": ["record_trace", "compile_stdlib", "neural_prune_or_synthesize", "nullspace_surgery", "predict"],
+                        "enum": [
+                            "record_trace",
+                            "compile_stdlib",
+                            "compile_lora_xs",
+                            "hot_swap_lora_xs",
+                            "neural_prune_or_synthesize",
+                            "nullspace_surgery",
+                            "predict",
+                        ],
                     },
                     "namespace": {"type": "string"},
                     "input_text": {"type": "string"},
                     "target_label": {"type": "string"},
                     "tokens_used": {"type": "integer"},
+                    "subspace_rank": {"type": "integer"},
+                    "cartridge_b64": {"type": "string"},
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                    "null_edit": {"type": "boolean"},
+                    "enforce_thinking_off_gate": {"type": "boolean"},
                     "samples": {"type": "array", "items": {"type": "object"}},
+                    "holdout_samples": {"type": "array", "items": {"type": "object"}},
                     "anchor_vectors": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
                     "edit_vectors": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
                     "edit_targets": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
@@ -489,7 +700,7 @@ def register(ctx: Any) -> None:
     ctx.register_tool(
         name="fabric_swarm_proxy_control",
         toolset="omni_fabric_runtime",
-        description="Manage the loopback 127.0.0.1 OpenAI-compatible (/v1/chat/completions + /swarm/*) distilling swarm proxy and metered budget envelope.",
+        description="Manage the loopback 127.0.0.1 OpenAI-v1 (/v1/models, /v1/chat/completions, /swarm/claim-bundle, /swarm/trace) swarm proxy for Hermes and GrokBot workers.",
         schema={
             "name": "fabric_swarm_proxy_control",
             "description": "Start, inspect, or stop the loopback multi-agent swarm proxy or check spend budget.",
@@ -648,10 +859,11 @@ def register(ctx: Any) -> None:
         st = rt.store.summarize_status()
         px = rt.proxy_mgr.status()
         return (
-            f"omni-fabric-runtime profile={env['selected_profile']} "
-            f"tasks={st['tasks_by_status']} promoted={st['promoted_objects']} "
-            f"traces={st['execution_traces']} routers={len(rt.boil_engine.compiled_routers)} "
-            f"proxy_running={px['running']}"
+            f"omni-fabric-runtime v0.3.0 profile={env['selected_profile']} "
+            f"tasks={st['tasks_by_status']} halted={st['halted_tasks']} "
+            f"promoted={st['promoted_objects']} envelopes={st['trace_envelopes']} "
+            f"routers={len(rt.boil_engine.compiled_routers)} "
+            f"loraxs={len(rt.boil_engine.lora_xs_cartridges)} proxy_running={px['running']}"
         )
 
     def _cmd_fabric_mode(raw: str = "") -> str:
@@ -666,7 +878,7 @@ def register(ctx: Any) -> None:
     ctx.register_command(
         name="fabric-status",
         handler=_cmd_fabric_status,
-        description="Inspect detected host capabilities, active setup profile, fenced tasks, promoted objects, and boil-down routers.",
+        description="Inspect detected host capabilities, active setup profile, fenced tasks, trace envelopes, and LoRA-XS cartridges.",
     )
     ctx.register_command(
         name="fabric-mode",

@@ -57,7 +57,7 @@ class AdaptiveNodeGrid:
                 choices = list(axis["choices"])
                 resolved[name] = val if val in choices else choices[0]
             elif kind == "boolean":
-                resolved[name] = bool(val)
+                resolved[name] = bool(axis.get("default", False)) if val is None else bool(val)
             else:
                 resolved[name] = val
         for rule in self.constraints:
@@ -260,11 +260,16 @@ class EnvironmentCapabilityProbe:
         return {
             "storage_mode": "ephemeral_remote_bridge" if is_thin else ("sqlite_wal" if sql_caps["sqlite_wal_supported"] else "sqlite_memory"),
             "fenced_cas_task_queue": True,
+            "multi_task_affinity_bundle_dispatch": True,
+            "enriched_trace_envelopes": True,
+            "attenuation_circuit_breaker": True,
             "maker_checker_object_store": True,
             "fts5_rrf_hybrid_search": bool(sql_caps["sqlite_fts5_supported"]) and not is_thin,
             "macro_and_action_lattice_dag": True,
             "parameterized_node_grid_and_rl_canary": True,
             "stdlib_relu_ridge_micro_compiler": not is_thin,
+            "lora_xs_subspace_cartridges": not is_thin,
+            "thinking_off_confound_gate": not is_thin,
             "pytorch_multihead_and_svd_nullspace_edit": neural_ready,
             "wanda_trace_channel_pruning": neural_ready,
             "safetensors_export": neural_ready and has_safetensors,

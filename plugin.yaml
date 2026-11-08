@@ -1,9 +1,9 @@
 manifest_version: 2
 api_version: 1
 name: omni-fabric-runtime
-version: "0.2.0"
+version: "0.3.0"
 kind: standalone
-description: "Environment-adaptive agent fabric runtime: SQLite WAL monotonic lease queue, distinct maker!=checker object cache with FTS5 RRF search, Macro-DAG workflow compiler, parameterized NodeGrid + RL canary optimizer, progressive 4-rung neural boil-down, loopback multi-agent swarm proxy, and optional remote Fabric sync."
+description: "Environment-adaptive agent fabric runtime: SQLite WAL monotonic lease queue, affinity bundle dispatch, enriched trace envelopes, distinct maker!=checker object cache with FTS5 RRF search, attenuation-gated Macro-DAG compiler, NodeGrid + RL canary optimizer, LoRA-XS 256B subspace cartridges with thinking=off baseline gating, and OpenAI-v1 loopback swarm proxy."
 author: "aidonerightcorp"
 license: "MIT"
 homepage: "https://github.com/aidonerightcorp/omni-fabric-runtime"
@@ -13,6 +13,7 @@ python_dependencies: []
 provides_tools:
   - fabric_probe_and_configure
   - fabric_task_queue
+  - fabric_claim_bundle
   - fabric_object_store
   - fabric_compile_workflow_dag
   - fabric_grid_and_rl_optimize
@@ -41,6 +42,26 @@ config_schema:
     type: string
     default: "balanced_adaptive"
     description: "Active NodeGrid regime cell (interactive_low_latency, balanced_adaptive, deep_swarm_campaign)."
+  bundle_cardinality_k:
+    type: integer
+    default: 3
+    description: "Default number of ready tasks (1..4) claimed atomically per worker bundle."
+  dispatch_affinity_mode:
+    type: string
+    default: "back_to_back_sequential"
+    description: "Worker bundle scheduling mode (single_isolated, back_to_back_sequential, simultaneous_batched_pack, speculative_pipeline)."
+  attenuation_circuit_breaker_milli:
+    type: integer
+    default: 650
+    description: "Cumulative survival floor in milli-units below which downstream DAG tasks pause until an independent checker resets attenuation."
+  lora_xs_subspace_rank:
+    type: integer
+    default: 8
+    description: "Singular subspace rank r for LoRA-XS r x r float32 weight cartridges (r=8 yields 256-byte cartridges)."
+  require_thinking_off_baseline_gate:
+    type: boolean
+    default: true
+    description: "Require candidate weight operators and LoRA-XS cartridges to beat both verbose and matched thinking=off baselines across seeds."
   local_runner_url:
     type: string
     default: "http://127.0.0.1:11434"
@@ -60,6 +81,7 @@ config_schema:
 tags:
   - durable-execution
   - lease-fencing
+  - bundle-dispatch
   - grid-optimization
   - reinforcement-learning
   - multi-agent-swarm
