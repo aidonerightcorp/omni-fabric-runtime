@@ -1,6 +1,6 @@
 {
   "grid_id": "omni_fabric_adaptive_grid",
-  "generation": 2,
+  "generation": 3,
   "default_regime": "balanced_adaptive",
   "axes": [
     {
@@ -95,7 +95,7 @@
       "kind": "integer_range",
       "low": 8,
       "high": 32,
-      "step": 4
+      "step": 2
     },
     {
       "name": "bundle_cardinality_k",
@@ -132,6 +132,34 @@
       "name": "require_thinking_off_baseline_gate",
       "kind": "boolean",
       "default": true
+    },
+    {
+      "name": "horizon_max_steps",
+      "kind": "integer_range",
+      "low": 12,
+      "high": 96,
+      "step": 12
+    },
+    {
+      "name": "checkpoint_cadence_steps",
+      "kind": "integer_range",
+      "low": 1,
+      "high": 8,
+      "step": 1
+    },
+    {
+      "name": "memory_lora_max_slots",
+      "kind": "integer_range",
+      "low": 4,
+      "high": 32,
+      "step": 4
+    },
+    {
+      "name": "policy_gradient_step_milli",
+      "kind": "integer_range",
+      "low": 20,
+      "high": 200,
+      "step": 20
     }
   ],
   "constraints": [
@@ -139,6 +167,11 @@
       "left": "pruned_hidden_units",
       "op": "le",
       "right": "micro_hidden_units"
+    },
+    {
+      "left": "checkpoint_cadence_steps",
+      "op": "le",
+      "right": "horizon_max_steps"
     }
   ],
   "regimes": {
@@ -160,7 +193,11 @@
       "dispatch_affinity_mode": "back_to_back_sequential",
       "attenuation_circuit_breaker_milli": 700,
       "lora_xs_subspace_rank": 8,
-      "require_thinking_off_baseline_gate": true
+      "require_thinking_off_baseline_gate": true,
+      "horizon_max_steps": 24,
+      "checkpoint_cadence_steps": 2,
+      "memory_lora_max_slots": 8,
+      "policy_gradient_step_milli": 60
     },
     "balanced_adaptive": {
       "lease_ttl_seconds": 180,
@@ -175,12 +212,16 @@
       "micro_feature_buckets": 96,
       "micro_hidden_units": 48,
       "pruned_hidden_units": 16,
-      "projected_subspace_dim": 16,
+      "projected_subspace_dim": 18,
       "bundle_cardinality_k": 3,
       "dispatch_affinity_mode": "back_to_back_sequential",
       "attenuation_circuit_breaker_milli": 650,
       "lora_xs_subspace_rank": 8,
-      "require_thinking_off_baseline_gate": true
+      "require_thinking_off_baseline_gate": true,
+      "horizon_max_steps": 48,
+      "checkpoint_cadence_steps": 3,
+      "memory_lora_max_slots": 16,
+      "policy_gradient_step_milli": 100
     },
     "deep_swarm_campaign": {
       "lease_ttl_seconds": 360,
@@ -195,12 +236,16 @@
       "micro_feature_buckets": 128,
       "micro_hidden_units": 64,
       "pruned_hidden_units": 24,
-      "projected_subspace_dim": 20,
+      "projected_subspace_dim": 24,
       "bundle_cardinality_k": 4,
       "dispatch_affinity_mode": "simultaneous_batched_pack",
       "attenuation_circuit_breaker_milli": 600,
       "lora_xs_subspace_rank": 8,
-      "require_thinking_off_baseline_gate": true
+      "require_thinking_off_baseline_gate": true,
+      "horizon_max_steps": 96,
+      "checkpoint_cadence_steps": 4,
+      "memory_lora_max_slots": 32,
+      "policy_gradient_step_milli": 140
     }
   },
   "runtime_constants": {
@@ -270,6 +315,27 @@
     "confound_min_gain_over_thinking_off": 0.05,
     "power_iteration_steps": 24,
     "trace_query_default_limit": 50,
-    "trace_query_max_limit": 500
+    "trace_query_max_limit": 500,
+    "pipeline_stage_count": 6,
+    "triad_base_cardinality": 3,
+    "triad_three_step_combinations": 27,
+    "safetensors_header_len_bytes": 8,
+    "symbolic_invariant_min_support": 2,
+    "symbolic_invariant_margin_threshold": 0.15,
+    "symbolic_skeleton_gain_scale": 2.5,
+    "embedding_raw_dim_default": 384,
+    "search_posting_prune_quantile_permille": 720,
+    "rrf_lexical_weight_default": 0.45,
+    "rrf_bilinear_weight_default": 0.55,
+    "memory_tokens_per_turn_estimate": 512,
+    "memory_turns_per_slot_estimate": 16,
+    "steered_contrastive_scale": 0.5,
+    "nullspace_drift_floor": 0.000000001,
+    "max_train_holdout_gap": 0.12,
+    "min_holdout_improvement": 0.01,
+    "person_step_confidence_milli": 940,
+    "machine_step_confidence_milli": 920,
+    "swarm_step_confidence_milli": 965,
+    "checked_save_reset_milli": 1000
   }
 }

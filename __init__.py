@@ -1,8 +1,8 @@
-"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.3.0).
+"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.4.0).
 
 Packages the complete local-to-federated agent fabric runtime behind 5 automatic
 environment setup profiles:
-1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), affinity bundle dispatch, attenuation-gated DAGs, and 256B LoRA-XS cartridges
+1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon DAGs, and leak-free recursive RL trials
 2. local_neural         - Unlocks NumPy/PyTorch multi-head micro-nets, 0-epoch SVD nullspace surgery, and Wanda trace channel pruning
 3. local_runner_swarm   - Unlocks loopback /v1/models + /v1/chat/completions + /swarm/* distilling proxy for Hermes subagents and GrokBot workers
 4. hybrid_fabric_sync   - Local SQLite WAL cell + selective sync of sync_ready objects & frontier tasks with upstream_endpoint
@@ -31,6 +31,15 @@ from .grid_and_env import (
     EffortAndBudgetGate,
     EnvironmentCapabilityProbe,
 )
+from .weight_pipeline import (
+    ACTOR_MODES,
+    BENCHMARK_ARCHETYPES,
+    MODEL_CLASSES,
+    TRIAD_OPS,
+    HorizonTriadDecomposer,
+    RecursiveHoldoutTrialEngine,
+    SixStageWeightPipelineEngine,
+)
 
 _GRID_PATH = Path(__file__).resolve().parent / "config" / "adaptive_fabric_grid.json"
 
@@ -45,6 +54,9 @@ class OmniFabricPluginRuntime:
         self.budget_gate = EffortAndBudgetGate(self.grid)
         self._store: Optional[LocalAdaptiveFabricStore] = None
         self._boil_engine: Optional[AdaptiveBoilDownEngine] = None
+        self._weight_pipeline: Optional[SixStageWeightPipelineEngine] = None
+        self._horizon_decomposer: Optional[HorizonTriadDecomposer] = None
+        self._recursive_trial: Optional[RecursiveHoldoutTrialEngine] = None
         self._proxy_mgr: Optional[LoopbackSwarmProxyManager] = None
         self._bridge: Optional[FederatedFabricBridge] = None
         self._override_profile: Optional[str] = None
@@ -125,12 +137,35 @@ class OmniFabricPluginRuntime:
             self._bridge = FederatedFabricBridge(self.grid, self.store, self.data_dir())
         return self._bridge
 
+    @property
+    def weight_pipeline(self) -> SixStageWeightPipelineEngine:
+        if self._weight_pipeline is None:
+            self._weight_pipeline = SixStageWeightPipelineEngine(
+                grid=self.grid,
+                store=self.store,
+                boil_engine=self.boil_engine,
+                budget_gate=self.budget_gate,
+            )
+        return self._weight_pipeline
+
+    @property
+    def horizon_decomposer(self) -> HorizonTriadDecomposer:
+        if self._horizon_decomposer is None:
+            self._horizon_decomposer = HorizonTriadDecomposer(self.grid, self.store)
+        return self._horizon_decomposer
+
+    @property
+    def recursive_trial_engine(self) -> RecursiveHoldoutTrialEngine:
+        if self._recursive_trial is None:
+            self._recursive_trial = RecursiveHoldoutTrialEngine(self.grid, self.store)
+        return self._recursive_trial
+
 
 def register(ctx: Any) -> None:
     """Entry point invoked by Hermes PluginManager."""
     rt = OmniFabricPluginRuntime(ctx)
 
-    # ── 1. Nine Unified Tools ─────────────────────────────────────────────
+    # ── 1. Twelve Unified Tools ───────────────────────────────────────────
 
     def _tool_probe_and_configure(args: Dict[str, Any], **_kw: Any) -> str:
         requested = args.get("setup_profile")
@@ -138,6 +173,9 @@ def register(ctx: Any) -> None:
             rt._override_profile = str(requested)
             rt._store = None
             rt._boil_engine = None
+            rt._weight_pipeline = None
+            rt._horizon_decomposer = None
+            rt._recursive_trial = None
             rt._proxy_mgr = None
             rt._bridge = None
         if args.get("budget_cap_micro_units") is not None:
@@ -761,6 +799,220 @@ def register(ctx: Any) -> None:
         handler=_tool_federated_sync,
     )
 
+    def _tool_compile_weight_unit(args: Dict[str, Any], **_kw: Any) -> str:
+        action = str(args.get("action") or "compile")
+        ns = str(args.get("namespace") or "default")
+        m_class = str(args.get("model_class") or "lora_xs_cartridge")
+        ddir = rt.data_dir()
+        models_dir = (ddir / "models") if ddir else None
+
+        if action == "predict":
+            res = rt.weight_pipeline.predict_weight_unit(
+                namespace=ns,
+                input_text=str(args.get("input_text") or ""),
+                model_class=args.get("model_class"),
+                candidate_docs=args.get("candidate_docs"),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "rollback":
+            res = rt.weight_pipeline.rollback_weight_unit(namespace=ns, model_class=m_class)
+            return json.dumps(res, sort_keys=True)
+        if action == "inspect":
+            ukey = rt.weight_pipeline._unit_key(ns, m_class)
+            spec = rt.weight_pipeline.promoted_units.get(ukey) or rt.weight_pipeline.promoted_units.get(ns)
+            if spec is None:
+                return json.dumps({"ok": False, "error": "no_promoted_weight_unit"}, sort_keys=True)
+            summary = {
+                "ok": True,
+                "namespace": spec["namespace"],
+                "model_class": spec["model_class"],
+                "unit_generation": spec["unit_generation"],
+                "labels": spec["labels"],
+                "cartridge_bytes": spec["cartridge_bytes"],
+                "safetensors_path": spec["safetensors_path"],
+                "anchor_max_drift": spec["anchor_max_drift"],
+                "ram_reduction_pct": spec["ram_reduction_pct"],
+                "holdout_accuracy": spec["holdout_accuracy"],
+            }
+            return json.dumps(summary, sort_keys=True)
+
+        res = rt.weight_pipeline.compile_weight_unit(
+            namespace=ns,
+            model_class=m_class,
+            samples=args.get("samples"),
+            holdout_samples=args.get("holdout_samples"),
+            episodic_memories=args.get("episodic_memories"),
+            anchor_vectors=args.get("anchor_vectors"),
+            anchor_texts=args.get("anchor_texts"),
+            maker_lineage=str(args.get("maker_lineage") or "maker_primary"),
+            checker_lineage=str(args.get("checker_lineage") or "checker_independent"),
+            subspace_rank=args.get("subspace_rank"),
+            safetensors_path=args.get("safetensors_path"),
+            null_edit=bool(args.get("null_edit", False)),
+            enforce_thinking_off_gate=args.get("enforce_thinking_off_gate"),
+            export_dir=models_dir,
+            regime=rt.active_regime(),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_compile_weight_unit",
+        toolset="omni_fabric_runtime",
+        description="Execute the unified 6-stage weight-space pipeline across 6 model classes (embedding, search_retrieval, decision_router, lora_xs_cartridge, memory_as_lora, steered_llm) with Null(W_sym) zero-drift projection and disjoint lineage canary gating.",
+        schema={
+            "name": "fabric_compile_weight_unit",
+            "description": "Compile, run 0-token inference, inspect, or auto-rollback 6-stage weight units from SQLite WAL traces or .safetensors cartridges.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["compile", "predict", "inspect", "rollback"],
+                    },
+                    "namespace": {"type": "string"},
+                    "model_class": {"type": "string", "enum": list(MODEL_CLASSES)},
+                    "input_text": {"type": "string"},
+                    "maker_lineage": {"type": "string"},
+                    "checker_lineage": {"type": "string"},
+                    "subspace_rank": {"type": "integer"},
+                    "safetensors_path": {"type": "string"},
+                    "null_edit": {"type": "boolean"},
+                    "enforce_thinking_off_gate": {"type": "boolean"},
+                    "samples": {"type": "array", "items": {"type": "object"}},
+                    "holdout_samples": {"type": "array", "items": {"type": "object"}},
+                    "episodic_memories": {"type": "array", "items": {"type": "object"}},
+                    "candidate_docs": {"type": "array", "items": {"type": "object"}},
+                    "anchor_texts": {"type": "array", "items": {"type": "string"}},
+                    "anchor_vectors": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                },
+            },
+        },
+        handler=_tool_compile_weight_unit,
+    )
+
+    def _tool_decompose_horizon(args: Dict[str, Any], **_kw: Any) -> str:
+        action = str(args.get("action") or "decompose")
+        if action == "catalog_triads":
+            return json.dumps(rt.horizon_decomposer.enumerate_triad_catalog(), sort_keys=True)
+        res = rt.horizon_decomposer.decompose_horizon(
+            workflow_id=str(args.get("workflow_id") or "horizon_workflow"),
+            goal=str(args.get("goal") or "Execute check-gated horizon workflow"),
+            actor_mode=str(args.get("actor_mode") or "swarm"),
+            triad_sequence=args.get("triad_sequence"),
+            horizon_steps=args.get("horizon_steps"),
+            checkpoint_cadence_steps=args.get("checkpoint_cadence_steps"),
+            benchmark_archetype=str(args.get("benchmark_archetype") or "general_horizon"),
+            namespace=str(args.get("namespace") or "horizon_dag"),
+            maker_lineage=str(args.get("maker_lineage") or "maker_pool_a"),
+            checker_lineage=str(args.get("checker_lineage") or "checker_pool_b"),
+            enqueue_immediately=bool(args.get("enqueue_immediately", True)),
+            regime=rt.active_regime(),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_decompose_horizon",
+        toolset="omni_fabric_runtime",
+        description="Decompose long-horizon Actor (person, machine, swarm) x {transfer, transform, save} workflows and competitive benchmarks into check-gated atomic task graphs with bitemporal checkpoints.",
+        schema={
+            "name": "fabric_decompose_horizon",
+            "description": "Enumerate all 27 3-step information triads or compile check-gated long-horizon atomic task DAGs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["decompose", "catalog_triads"]},
+                    "workflow_id": {"type": "string"},
+                    "goal": {"type": "string"},
+                    "actor_mode": {"type": "string", "enum": list(ACTOR_MODES)},
+                    "triad_sequence": {"type": "array", "items": {"type": "string", "enum": list(TRIAD_OPS)}},
+                    "horizon_steps": {"type": "integer"},
+                    "checkpoint_cadence_steps": {"type": "integer"},
+                    "benchmark_archetype": {"type": "string", "enum": list(BENCHMARK_ARCHETYPES)},
+                    "namespace": {"type": "string"},
+                    "maker_lineage": {"type": "string"},
+                    "checker_lineage": {"type": "string"},
+                    "enqueue_immediately": {"type": "boolean"},
+                },
+            },
+        },
+        handler=_tool_decompose_horizon,
+    )
+
+    def _tool_recursive_trial(args: Dict[str, Any], **_kw: Any) -> str:
+        action = str(args.get("action") or "propose_trial")
+        cid = str(args.get("campaign_id") or "default_recursive_campaign")
+        if action == "define_space":
+            res = rt.store.define_optimization_space(
+                campaign_id=cid,
+                axes=list(args.get("axes") or []),
+                constraints=args.get("constraints"),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "propose_trial":
+            res = rt.recursive_trial_engine.propose_trial(
+                campaign_id=cid,
+                cartridge_ids=args.get("cartridge_ids"),
+                batch_size=args.get("batch_size"),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "record_trial":
+            res = rt.recursive_trial_engine.record_trial(
+                campaign_id=cid,
+                params=dict(args.get("params") or {}),
+                cartridge_id=str(args.get("cartridge_id") or "cartridge_default"),
+                train_reward=float(args["train_reward"]),
+                holdout_reward=float(args["holdout_reward"]),
+                thinking_off_holdout_reward=float(args.get("thinking_off_holdout_reward") or 0.0),
+                cost=float(args.get("cost") or 0.0),
+                maker_id=str(args.get("maker_id") or "maker_1"),
+                checker_id=str(args.get("checker_id") or "checker_1"),
+                maker_lineage=str(args.get("maker_lineage") or "lineage_a"),
+                checker_lineage=str(args.get("checker_lineage") or "lineage_b"),
+                auto_expand=bool(args.get("auto_expand", True)),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        return json.dumps(rt.recursive_trial_engine.summarize_campaign(cid), sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_recursive_trial",
+        toolset="omni_fabric_runtime",
+        description="Run leak-free holdout UCB + policy-gradient trials over NodeGrid cells and weight cartridges with disjoint maker!=checker lineage and instant overfit rejection.",
+        schema={
+            "name": "fabric_recursive_trial",
+            "description": "Propose, record, or summarize recursive optimization trials gated against sealed holdout splits and thinking=off controls.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["define_space", "propose_trial", "record_trial", "summarize_campaign"],
+                    },
+                    "campaign_id": {"type": "string"},
+                    "axes": {"type": "array", "items": {"type": "object"}},
+                    "constraints": {"type": "array", "items": {"type": "object"}},
+                    "cartridge_ids": {"type": "array", "items": {"type": "string"}},
+                    "batch_size": {"type": "integer"},
+                    "params": {"type": "object"},
+                    "cartridge_id": {"type": "string"},
+                    "train_reward": {"type": "number"},
+                    "holdout_reward": {"type": "number"},
+                    "thinking_off_holdout_reward": {"type": "number"},
+                    "cost": {"type": "number"},
+                    "maker_id": {"type": "string"},
+                    "checker_id": {"type": "string"},
+                    "maker_lineage": {"type": "string"},
+                    "checker_lineage": {"type": "string"},
+                    "auto_expand": {"type": "boolean"},
+                },
+                "required": ["action"],
+            },
+        },
+        handler=_tool_recursive_trial,
+    )
+
     # ── 2. LLM Request Middleware ─────────────────────────────────────────
 
     def _llm_request_middleware(request: Dict[str, Any], **_kw: Any) -> Optional[Dict[str, Any]]:
@@ -859,10 +1111,11 @@ def register(ctx: Any) -> None:
         st = rt.store.summarize_status()
         px = rt.proxy_mgr.status()
         return (
-            f"omni-fabric-runtime v0.3.0 profile={env['selected_profile']} "
+            f"omni-fabric-runtime v0.4.0 profile={env['selected_profile']} "
             f"tasks={st['tasks_by_status']} halted={st['halted_tasks']} "
             f"promoted={st['promoted_objects']} envelopes={st['trace_envelopes']} "
             f"routers={len(rt.boil_engine.compiled_routers)} "
+            f"weight_units={len(rt.weight_pipeline.promoted_units)} "
             f"loraxs={len(rt.boil_engine.lora_xs_cartridges)} proxy_running={px['running']}"
         )
 
@@ -872,6 +1125,10 @@ def register(ctx: Any) -> None:
             return f"Unknown profile '{chosen}'. Valid: auto, {', '.join(SETUP_PROFILES)}"
         rt._override_profile = chosen
         rt._store = None
+        rt._boil_engine = None
+        rt._weight_pipeline = None
+        rt._horizon_decomposer = None
+        rt._recursive_trial = None
         env = rt.resolve_environment(allow_socket_probe=False)
         return f"Switched setup_profile -> {env['selected_profile']} (requested={chosen})"
 
