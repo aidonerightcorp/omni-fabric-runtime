@@ -1,6 +1,6 @@
 {
   "grid_id": "omni_fabric_adaptive_grid",
-  "generation": 4,
+  "generation": 5,
   "default_regime": "balanced_adaptive",
   "axes": [
     {
@@ -195,6 +195,27 @@
       "low": 4,
       "high": 24,
       "step": 4
+    },
+    {
+      "name": "wgsl_workgroup_size",
+      "kind": "integer_range",
+      "low": 16,
+      "high": 256,
+      "step": 16
+    },
+    {
+      "name": "dp_epsilon_milli",
+      "kind": "integer_range",
+      "low": 100,
+      "high": 5000,
+      "step": 100
+    },
+    {
+      "name": "dp_clip_norm_milli",
+      "kind": "integer_range",
+      "low": 100,
+      "high": 4000,
+      "step": 100
     }
   ],
   "constraints": [
@@ -242,7 +263,10 @@
       "topic_nullspace_rank": 4,
       "koopman_lifted_dim": 16,
       "koopman_lookahead_depth": 3,
-      "hopfield_inverse_temp_beta": 8
+      "hopfield_inverse_temp_beta": 8,
+      "wgsl_workgroup_size": 32,
+      "dp_epsilon_milli": 1000,
+      "dp_clip_norm_milli": 1000
     },
     "balanced_adaptive": {
       "lease_ttl_seconds": 180,
@@ -271,7 +295,10 @@
       "topic_nullspace_rank": 6,
       "koopman_lifted_dim": 24,
       "koopman_lookahead_depth": 4,
-      "hopfield_inverse_temp_beta": 12
+      "hopfield_inverse_temp_beta": 12,
+      "wgsl_workgroup_size": 64,
+      "dp_epsilon_milli": 1000,
+      "dp_clip_norm_milli": 1000
     },
     "deep_swarm_campaign": {
       "lease_ttl_seconds": 360,
@@ -300,7 +327,10 @@
       "topic_nullspace_rank": 8,
       "koopman_lifted_dim": 32,
       "koopman_lookahead_depth": 6,
-      "hopfield_inverse_temp_beta": 16
+      "hopfield_inverse_temp_beta": 16,
+      "wgsl_workgroup_size": 128,
+      "dp_epsilon_milli": 500,
+      "dp_clip_norm_milli": 800
     }
   },
   "runtime_constants": {
@@ -403,6 +433,23 @@
     "hopfield_novelty_energy_threshold": 0.35,
     "woodbury_init_precision_scale": 20.0,
     "c99_float_digits": 8,
-    "structural_moment_slots": 6
+    "structural_moment_slots": 6,
+    "http_default_port": 80,
+    "max_tcp_port": 65535,
+    "http_status_forbidden": 403,
+    "leb_shift_bits": 7,
+    "leb_low_mask": 127,
+    "leb_cont_bit": 128,
+    "sleb_sign_bit": 64,
+    "wasm_page_bytes": 65536,
+    "wasm_default_io_alignment_bytes": 64,
+    "wasm_f32_shift_log2": 2,
+    "dp_delta_default": 0.00001,
+    "dp_gaussian_c_factor": 2.0,
+    "dp_gaussian_delta_num": 1.25,
+    "two_pi": 6.283185307179586,
+    "uint32_norm_divisor": 4294967296.0,
+    "digest_u32_slice_bytes": 4,
+    "digest_u32_second_end": 8
   }
 }

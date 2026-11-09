@@ -4,21 +4,247 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import http.client
 import importlib
+import ipaddress
 import json
 import math
+import socket
+import ssl
 import struct
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from .fabric_substrate import LocalAdaptiveFabricStore
 from .grid_and_env import AdaptiveNodeGrid, EffortAndBudgetGate
+
+_ALWAYS_BLOCKED_NETWORKS: Tuple[Any, ...] = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "0.0.0.0/8",
+        "100.64.0.0/10",
+        "169.254.0.0/16",
+        "192.0.0.0/24",
+        "198.18.0.0/15",
+        "224.0.0.0/4",
+        "240.0.0.0/4",
+        "::/128",
+        "fe80::/10",
+        "ff00::/8",
+        "fd00:ec2::254/128",
+    )
+)
+_PRIVATE_OR_LOOPBACK_NETWORKS: Tuple[Any, ...] = tuple(
+    ipaddress.ip_network(cidr)
+    for cidr in (
+        "127.0.0.0/8",
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "::1/128",
+        "fc00::/7",
+    )
+)
+_BLOCKED_METADATA_HOSTS: Tuple[str, ...] = (
+    "metadata.google.internal",
+    "metadata",
+    "instance-data",
+)
+_LOOPBACK_LITERAL_IPS: Tuple[Any, ...] = (
+    ipaddress.ip_address("127.0.0.1"),
+    ipaddress.ip_address("::1"),
+)
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection pinned to a pre-resolved IP address so DNS rebinding is impossible."""
+
+    def __init__(self, pinned_ip: str, port: int, timeout: float) -> None:
+        super().__init__(pinned_ip, port=port, timeout=timeout)
+        self._pinned_ip = pinned_ip
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPSConnection pinned to a pre-resolved IP while preserving original TLS SNI hostname."""
+
+    def __init__(self, pinned_ip: str, sni_host: str, port: int, timeout: float, tls_ctx: ssl.SSLContext) -> None:
+        super().__init__(pinned_ip, port=port, timeout=timeout, context=tls_ctx)
+        self._pinned_ip = pinned_ip
+        self._sni_host = sni_host
+        self._tls_ctx = tls_ctx
+
+    def connect(self) -> None:
+        raw_sock = socket.create_connection((self._pinned_ip, self.port), self.timeout)
+        self.sock = self._tls_ctx.wrap_socket(raw_sock, server_hostname=self._sni_host)
+
+
+def _vet_and_resolve_url(
+    base_url: str,
+    mode: str,
+    allow_local: bool,
+    grid: AdaptiveNodeGrid,
+) -> Dict[str, Any]:
+    cleaned = base_url.strip()
+    if not cleaned:
+        return {"ok": False, "error": "empty_endpoint_url"}
+    if "?" in cleaned or "#" in cleaned:
+        return {"ok": False, "error": "url_query_or_fragment_forbidden"}
+
+    parsed = urllib.parse.urlsplit(cleaned)
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return {"ok": False, "error": "invalid_url_scheme"}
+    if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+        return {"ok": False, "error": "url_userinfo_forbidden"}
+    if parsed.query or parsed.fragment:
+        return {"ok": False, "error": "url_query_or_fragment_forbidden"}
+
+    orig_host = (parsed.hostname or "").strip().lower()
+    if not orig_host:
+        return {"ok": False, "error": "missing_hostname"}
+    if orig_host in _BLOCKED_METADATA_HOSTS or orig_host.endswith(".metadata.google.internal"):
+        return {"ok": False, "error": "blocked_metadata_host"}
+
+    try:
+        raw_port = parsed.port
+    except ValueError:
+        return {"ok": False, "error": "invalid_url_port"}
+
+    http_def = int(grid.runtime_constants["http_default_port"])
+    https_def = int(grid.runtime_constants["https_default_port"])
+    max_port = int(grid.runtime_constants["max_tcp_port"])
+    default_port = https_def if scheme == "https" else http_def
+    port = int(raw_port) if raw_port is not None else default_port
+    if port < 1 or port > max_port:
+        return {"ok": False, "error": "invalid_url_port"}
+
+    if mode == "local_runner":
+        if not allow_local:
+            return {"ok": False, "error": "local_runner_disabled_by_config"}
+        if orig_host not in ("127.0.0.1", "::1", "localhost"):
+            return {"ok": False, "error": "local_runner_must_be_loopback"}
+
+    try:
+        infos = socket.getaddrinfo(orig_host, port, type=socket.SOCK_STREAM)
+    except OSError as exc:
+        return {"ok": False, "error": f"dns_resolution_failed: {exc}"}
+    if not infos:
+        return {"ok": False, "error": "dns_resolution_empty"}
+
+    pinned_ip = ""
+    for _fam, _stype, _proto, _canon, sockaddr in infos:
+        raw_addr = str(sockaddr[0])
+        if "%" in raw_addr:
+            return {"ok": False, "error": "ipv6_zone_scope_forbidden"}
+        try:
+            ip_raw = ipaddress.ip_address(raw_addr)
+        except ValueError:
+            return {"ok": False, "error": "invalid_resolved_ip"}
+        ip_obj = ip_raw.ipv4_mapped if getattr(ip_raw, "ipv4_mapped", None) is not None else ip_raw
+
+        if (
+            ip_obj.is_multicast
+            or ip_obj.is_unspecified
+            or ip_obj.is_link_local
+            or (ip_obj.is_reserved and not ip_obj.is_loopback)
+            or any(ip_obj in net for net in _ALWAYS_BLOCKED_NETWORKS)
+        ):
+            return {"ok": False, "error": f"blocked_special_or_metadata_ip:{ip_obj}"}
+
+        if mode == "local_runner":
+            if ip_obj not in _LOOPBACK_LITERAL_IPS:
+                return {"ok": False, "error": f"local_runner_non_loopback_ip:{ip_obj}"}
+        else:
+            is_priv_or_loop = (
+                ip_obj.is_loopback
+                or ip_obj.is_private
+                or any(ip_obj in net for net in _PRIVATE_OR_LOOPBACK_NETWORKS)
+            )
+            if is_priv_or_loop and not allow_local:
+                return {"ok": False, "error": f"private_or_loopback_upstream_refused:{ip_obj}"}
+
+        if not pinned_ip:
+            pinned_ip = str(ip_obj)
+
+    host_fmt = f"[{orig_host}]" if ":" in orig_host else orig_host
+    host_header = host_fmt if port == default_port else f"{host_fmt}:{port}"
+    return {
+        "ok": True,
+        "scheme": scheme,
+        "orig_host": orig_host,
+        "pinned_ip": pinned_ip,
+        "port": port,
+        "base_path": parsed.path.rstrip("/"),
+        "host_header": host_header,
+    }
+
+
+def _send_vetted_http(
+    base_url: str,
+    route: str,
+    *,
+    method: str = "GET",
+    body_bytes: Optional[bytes] = None,
+    headers: Optional[Mapping[str, str]] = None,
+    timeout_s: float = 1.0,
+    mode: str = "upstream",
+    allow_local: bool = False,
+    grid: AdaptiveNodeGrid,
+) -> Dict[str, Any]:
+    vet = _vet_and_resolve_url(base_url, mode=mode, allow_local=allow_local, grid=grid)
+    if not vet.get("ok"):
+        return vet
+
+    clean_route = route if route.startswith("/") else f"/{route}"
+    full_path = f"{vet['base_path']}{clean_route}" or "/"
+    req_headers: Dict[str, str] = dict(headers or {})
+    req_headers["Host"] = str(vet["host_header"])
+    req_headers["Connection"] = "close"
+    if body_bytes is not None and "Content-Length" not in req_headers:
+        req_headers["Content-Length"] = str(len(body_bytes))
+
+    conn: http.client.HTTPConnection
+    if vet["scheme"] == "https":
+        tls_ctx = ssl.create_default_context()
+        conn = _PinnedHTTPSConnection(
+            pinned_ip=str(vet["pinned_ip"]),
+            sni_host=str(vet["orig_host"]),
+            port=int(vet["port"]),
+            timeout=timeout_s,
+            tls_ctx=tls_ctx,
+        )
+    else:
+        conn = _PinnedHTTPConnection(
+            pinned_ip=str(vet["pinned_ip"]),
+            port=int(vet["port"]),
+            timeout=timeout_s,
+        )
+
+    ok_min = int(grid.runtime_constants["http_ok_min"])
+    ok_max = int(grid.runtime_constants["http_ok_max"])
+    try:
+        conn.request(method, full_path, body=body_bytes, headers=req_headers)
+        resp = conn.getresponse()
+        status = int(resp.status)
+        raw_text = resp.read().decode("utf-8", errors="replace")
+        if ok_min <= status <= ok_max:
+            parsed_json = json.loads(raw_text) if raw_text.strip() else {}
+            return {"ok": True, "status_code": status, "data": parsed_json}
+        return {"ok": False, "status_code": status, "error": raw_text or f"http_status_{status}"}
+    except Exception as exc:
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
 
 
 class AdaptiveBoilDownEngine:
@@ -1092,12 +1318,14 @@ class LoopbackSwarmProxyManager:
         boil_engine: AdaptiveBoilDownEngine,
         budget_gate: EffortAndBudgetGate,
         local_runner_url: str = "http://127.0.0.1:11434",
+        allow_local_runner: bool = False,
     ) -> None:
         self.grid = grid
         self.store = store
         self.boil_engine = boil_engine
         self.budget_gate = budget_gate
         self.local_runner_url = local_runner_url.rstrip("/")
+        self.allow_local_runner = bool(allow_local_runner)
         self._server: Optional[ThreadingHTTPServer] = None
         self._thread: Optional[threading.Thread] = None
         self.requests_served: int = 0
@@ -1145,6 +1373,9 @@ class LoopbackSwarmProxyManager:
         return "swarm"
 
     def start(self, host: str = "127.0.0.1", port: int = 0) -> Dict[str, Any]:
+        clean_host = host.strip().lower()
+        if clean_host not in ("127.0.0.1", "localhost", "::1"):
+            return {"ok": False, "running": False, "error": "loopback_bind_host_required"}
         if self._server is not None:
             addr = self._server.server_address
             return {
@@ -1170,7 +1401,29 @@ class LoopbackSwarmProxyManager:
                 self.end_headers()
                 self.wfile.write(raw)
 
+            def _guard_loopback_request(self) -> bool:
+                forbid_code = int(manager.grid.runtime_constants["http_status_forbidden"])
+                host_hdr = (self.headers.get("Host") or "").strip().lower()
+                valid_host = host_hdr in ("127.0.0.1", "localhost", "[::1]") or host_hdr.startswith(
+                    ("127.0.0.1:", "localhost:", "[::1]:")
+                )
+                if not valid_host:
+                    self._send_json(forbid_code, {"ok": False, "error": "forbidden_host_header"})
+                    return False
+
+                origin_hdr = (self.headers.get("Origin") or "").strip()
+                if origin_hdr:
+                    parsed_origin = urllib.parse.urlsplit(origin_hdr)
+                    origin_scheme = parsed_origin.scheme.lower()
+                    origin_host = (parsed_origin.hostname or "").strip().lower()
+                    if origin_scheme not in ("http", "https") or origin_host not in ("127.0.0.1", "localhost", "::1"):
+                        self._send_json(forbid_code, {"ok": False, "error": "forbidden_origin_header"})
+                        return False
+                return True
+
             def do_GET(self) -> None:
+                if not self._guard_loopback_request():
+                    return
                 ok_code = int(manager.grid.runtime_constants["http_status_ok"])
                 parsed_path = urllib.parse.urlparse(self.path)
                 route = parsed_path.path
@@ -1208,6 +1461,8 @@ class LoopbackSwarmProxyManager:
                 )
 
             def do_POST(self) -> None:
+                if not self._guard_loopback_request():
+                    return
                 manager.requests_served += 1
                 length = int(self.headers.get("Content-Length") or "0")
                 raw_body = self.rfile.read(length).decode("utf-8") if length > 0 else "{}"
@@ -1431,30 +1686,31 @@ class LoopbackSwarmProxyManager:
                         )
                         return
 
-                    # Rung 2: Optional local model runner forward if model requested & runner reachable
-                    if data.get("use_local_runner") and manager.local_runner_url:
-                        try:
-                            runner_payload = {
-                                "model": str(data.get("model") or ""),
-                                "messages": msgs,
-                                "stream": False,
-                                "format": "json",
-                                "options": {
-                                    "temperature": 0.0,
-                                    "num_ctx": int(manager.grid.runtime_constants["default_runner_ctx_tokens"]),
-                                },
-                            }
-                            req = urllib.request.Request(
-                                f"{manager.local_runner_url}/api/chat",
-                                data=json.dumps(runner_payload).encode("utf-8"),
-                                headers={"Content-Type": "application/json"},
-                                method="POST",
-                            )
-                            with urllib.request.urlopen(
-                                req,
-                                timeout=float(manager.grid.runtime_constants["upstream_http_timeout_sec"]),
-                            ) as resp:
-                                out_json = json.loads(resp.read().decode("utf-8"))
+                    # Rung 2: Optional local model runner forward if model requested & runner explicitly enabled
+                    if data.get("use_local_runner") and manager.local_runner_url and manager.allow_local_runner:
+                        runner_payload = {
+                            "model": str(data.get("model") or ""),
+                            "messages": msgs,
+                            "stream": False,
+                            "format": "json",
+                            "options": {
+                                "temperature": 0.0,
+                                "num_ctx": int(manager.grid.runtime_constants["default_runner_ctx_tokens"]),
+                            },
+                        }
+                        runner_res = _send_vetted_http(
+                            manager.local_runner_url,
+                            "/api/chat",
+                            method="POST",
+                            body_bytes=json.dumps(runner_payload).encode("utf-8"),
+                            headers={"Content-Type": "application/json", "Accept": "application/json"},
+                            timeout_s=float(manager.grid.runtime_constants["upstream_http_timeout_sec"]),
+                            mode="local_runner",
+                            allow_local=manager.allow_local_runner,
+                            grid=manager.grid,
+                        )
+                        if runner_res.get("ok") and isinstance(runner_res.get("data"), Mapping):
+                            out_json = runner_res["data"]
                             content_str = str((out_json.get("message") or {}).get("content") or "{}")
                             eval_toks = int(out_json.get("eval_count") or 0) + int(out_json.get("prompt_eval_count") or 0)
                             if data.get("trace_label"):
@@ -1478,8 +1734,6 @@ class LoopbackSwarmProxyManager:
                                 },
                             )
                             return
-                        except Exception:
-                            pass
 
                     # Record trace during Wave-1 seeding
                     label = str(data.get("trace_label") or "general_execute")
@@ -1561,12 +1815,19 @@ class LoopbackSwarmProxyManager:
 
 
 class FederatedFabricBridge:
-    """Selective sync & thin-client bridge to any configured upstream Fabric endpoint."""
+    """Selective sync & thin-client bridge to owner-configured upstream Fabric endpoint."""
 
-    def __init__(self, grid: AdaptiveNodeGrid, store: LocalAdaptiveFabricStore, data_dir: Optional[Path]) -> None:
+    def __init__(
+        self,
+        grid: AdaptiveNodeGrid,
+        store: LocalAdaptiveFabricStore,
+        data_dir: Optional[Path],
+        allow_local_upstream: bool = False,
+    ) -> None:
         self.grid = grid
         self.store = store
         self.data_dir = data_dir
+        self.allow_local_upstream = bool(allow_local_upstream)
 
     def _token_path(self, base_url: str) -> Optional[Path]:
         if self.data_dir is None:
@@ -1606,7 +1867,6 @@ class FederatedFabricBridge:
         clean_base = base_url.strip().rstrip("/")
         if not clean_base:
             return {"ok": False, "error": "upstream_endpoint_not_configured"}
-        url = f"{clean_base}{route}"
         headers: Dict[str, str] = {"Accept": "application/json"}
         tok = self._load_worker_token(clean_base)
         if tok:
@@ -1616,20 +1876,23 @@ class FederatedFabricBridge:
             body_bytes = json.dumps(dict(payload)).encode("utf-8")
             headers["Content-Type"] = "application/json"
 
-        req = urllib.request.Request(url, data=body_bytes, headers=headers, method=method)
         timeout_s = float(self.grid.runtime_constants["upstream_http_timeout_sec"])
-        try:
-            with urllib.request.urlopen(req, timeout=timeout_s) as resp:
-                raw = resp.read().decode("utf-8")
-                parsed = json.loads(raw) if raw.strip() else {}
-                if isinstance(parsed, dict) and parsed.get("worker_token"):
-                    self._save_worker_token(clean_base, str(parsed["worker_token"]))
-                return {"ok": True, "status_code": int(resp.status), "data": parsed}
-        except urllib.error.HTTPError as exc:
-            err_body = exc.read().decode("utf-8", errors="replace")
-            return {"ok": False, "status_code": int(exc.code), "error": err_body}
-        except Exception as exc:
-            return {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
+        res = _send_vetted_http(
+            clean_base,
+            route,
+            method=method,
+            body_bytes=body_bytes,
+            headers=headers,
+            timeout_s=timeout_s,
+            mode="upstream",
+            allow_local=self.allow_local_upstream,
+            grid=self.grid,
+        )
+        if res.get("ok"):
+            parsed = res.get("data")
+            if isinstance(parsed, dict) and parsed.get("worker_token"):
+                self._save_worker_token(clean_base, str(parsed["worker_token"]))
+        return res
 
     def check_upstream_pulse(self, base_url: str) -> Dict[str, Any]:
         return self._http_json(base_url, "/q/pulse", method="GET")

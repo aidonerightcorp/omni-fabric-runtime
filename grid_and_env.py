@@ -141,27 +141,52 @@ class EnvironmentCapabilityProbe:
                 return 0
         return 0
 
-    def _probe_tcp_endpoint(self, raw_url: str) -> bool:
+    def _probe_tcp_endpoint(self, raw_url: str, allow_local_runner: bool = False) -> bool:
+        if not allow_local_runner:
+            return False
         cleaned = raw_url.strip()
-        if not cleaned:
+        if not cleaned or "?" in cleaned or "#" in cleaned:
             return False
         try:
-            from urllib.parse import urlparse
+            import ipaddress
+            from urllib.parse import urlsplit
 
-            parsed = urlparse(cleaned)
-            host = parsed.hostname
-            if not host:
+            parsed = urlsplit(cleaned)
+            if parsed.scheme.lower() not in ("http", "https"):
+                return False
+            if parsed.username is not None or parsed.password is not None or "@" in parsed.netloc:
+                return False
+            host = (parsed.hostname or "").strip().lower()
+            if host not in ("127.0.0.1", "::1", "localhost"):
                 return False
             default_port = int(self.grid.runtime_constants["default_local_runner_port"])
-            if parsed.scheme == "https":
+            if parsed.scheme.lower() == "https":
                 port = parsed.port or int(self.grid.runtime_constants["https_default_port"])
             else:
                 port = parsed.port or default_port
+            max_port = int(self.grid.runtime_constants["max_tcp_port"])
+            if port < 1 or port > max_port:
+                return False
+            infos = socket.getaddrinfo(host, int(port), type=socket.SOCK_STREAM)
+            if not infos:
+                return False
+            pinned_ip = ""
+            for _fam, _stype, _proto, _canon, sockaddr in infos:
+                raw_addr = str(sockaddr[0])
+                if "%" in raw_addr:
+                    return False
+                ip_obj = ipaddress.ip_address(raw_addr)
+                if getattr(ip_obj, "ipv4_mapped", None) is not None:
+                    ip_obj = ip_obj.ipv4_mapped
+                if ip_obj not in (ipaddress.ip_address("127.0.0.1"), ipaddress.ip_address("::1")):
+                    return False
+                if not pinned_ip:
+                    pinned_ip = str(sockaddr[0])
             timeout_s = (
                 float(self.grid.runtime_constants["loopback_probe_timeout_ms"])
                 / float(self.grid.runtime_constants["ms_per_second"])
             )
-            sock = socket.create_connection((host, int(port)), timeout=timeout_s)
+            sock = socket.create_connection((pinned_ip, int(port)), timeout=timeout_s)
             sock.close()
             return True
         except Exception:
@@ -174,6 +199,7 @@ class EnvironmentCapabilityProbe:
         local_runner_url: str = "",
         upstream_endpoint: str = "",
         allow_socket_probe: bool = False,
+        allow_local_runner: bool = False,
         masked_modules: Optional[Tuple[str, ...]] = None,
         force_readonly: bool = False,
         simulated_runner_reachable: Optional[bool] = None,
@@ -188,8 +214,8 @@ class EnvironmentCapabilityProbe:
 
         if simulated_runner_reachable is not None:
             runner_ok = bool(simulated_runner_reachable)
-        elif allow_socket_probe and local_runner_url.strip():
-            runner_ok = self._probe_tcp_endpoint(local_runner_url)
+        elif allow_socket_probe and allow_local_runner and local_runner_url.strip():
+            runner_ok = self._probe_tcp_endpoint(local_runner_url, allow_local_runner=allow_local_runner)
         else:
             runner_ok = False
 
@@ -276,6 +302,8 @@ class EnvironmentCapabilityProbe:
             "pytorch_multihead_and_svd_nullspace_edit": neural_ready,
             "wanda_trace_channel_pruning": neural_ready,
             "safetensors_export": neural_ready and has_safetensors,
+            "wasm_wgsl_in_memory_compiler": not is_thin,
+            "dp_nullspace_woodbury_merge": not is_thin,
             "loopback_distilling_swarm_proxy": proxy_ready,
             "local_runner_schema_boildown": proxy_ready and runner_ok,
             "selective_upstream_fabric_sync": sync_ready,

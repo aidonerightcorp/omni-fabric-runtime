@@ -1,16 +1,17 @@
-"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.5.0).
+"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.6.0).
 
 Packages the complete local-to-federated agent fabric runtime behind 5 automatic
 environment setup profiles:
-1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon DAGs, leak-free recursive RL trials, topic-nullspace attribution, Koopman + CEGAR planning, and 5-target portable Hopfield/Woodbury cartridges
+1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon DAGs, leak-free recursive RL trials, topic-nullspace attribution, Koopman + CEGAR planning, 7-target portable cartridges (including in-memory IEEE-754 WASM + WebGPU WGSL), and (epsilon, delta)-DP Nullspace Woodbury merges
 2. local_neural         - Enables NumPy/PyTorch multi-head micro-nets, 0-epoch SVD nullspace surgery, and Wanda trace channel pruning
 3. local_runner_swarm   - Enables loopback /v1/models + /v1/chat/completions + /swarm/* distilling proxy for Hermes subagents and GrokBot workers
-4. hybrid_fabric_sync   - Local SQLite WAL cell + selective sync of sync_ready objects & frontier tasks with upstream_endpoint
-5. thin_remote_client   - Ephemeral zero-disk container bridge to upstream_endpoint (/q/* and /mcp)
+4. hybrid_fabric_sync   - Local SQLite WAL cell + selective sync of sync_ready objects & frontier tasks with owner-configured upstream_endpoint
+5. thin_remote_client   - Ephemeral zero-disk container bridge to owner-configured upstream_endpoint (/q/* and /mcp)
 """
 
 from __future__ import annotations
 
+import atexit
 import json
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -36,6 +37,10 @@ from .nextgen_and_portable import (
     KoopmanCegarTrajectoryEngine,
     PortableCartridgeAndOneShotEngine,
     TopicNullspaceAttributionEngine,
+)
+from .wasm_wgsl_and_dp import (
+    DpNullspaceWoodburyEngine,
+    WasmWgslKernelCompiler,
 )
 from .weight_pipeline import (
     ACTOR_MODES,
@@ -66,6 +71,8 @@ class OmniFabricPluginRuntime:
         self._attribution_engine: Optional[TopicNullspaceAttributionEngine] = None
         self._koopman_engine: Optional[KoopmanCegarTrajectoryEngine] = None
         self._portable_engine: Optional[PortableCartridgeAndOneShotEngine] = None
+        self._wasm_wgsl_compiler: Optional[WasmWgslKernelCompiler] = None
+        self._dp_merge_engine: Optional[DpNullspaceWoodburyEngine] = None
         self._proxy_mgr: Optional[LoopbackSwarmProxyManager] = None
         self._bridge: Optional[FederatedFabricBridge] = None
         self._override_profile: Optional[str] = None
@@ -92,8 +99,18 @@ class OmniFabricPluginRuntime:
     def upstream_endpoint(self) -> str:
         return str(self._cfg("upstream_endpoint", "")).strip()
 
+    def allow_local_upstream(self) -> bool:
+        return bool(self._cfg("allow_local_upstream", False))
+
     def local_runner_url(self) -> str:
         return str(self._cfg("local_runner_url", "http://127.0.0.1:11434")).strip()
+
+    def allow_local_runner(self) -> bool:
+        return bool(self._cfg("allow_local_runner", False))
+
+    def stop_proxy(self) -> None:
+        if self._proxy_mgr is not None:
+            self._proxy_mgr.stop()
 
     def resolve_environment(self, allow_socket_probe: bool = False, **sim_kwargs: Any) -> Dict[str, Any]:
         req_prof = self._override_profile or str(self._cfg("setup_profile", "auto"))
@@ -103,6 +120,7 @@ class OmniFabricPluginRuntime:
             local_runner_url=self.local_runner_url(),
             upstream_endpoint=self.upstream_endpoint(),
             allow_socket_probe=allow_socket_probe,
+            allow_local_runner=self.allow_local_runner(),
             **sim_kwargs,
         )
         self._last_probe = info
@@ -137,13 +155,20 @@ class OmniFabricPluginRuntime:
                 boil_engine=self.boil_engine,
                 budget_gate=self.budget_gate,
                 local_runner_url=self.local_runner_url(),
+                allow_local_runner=self.allow_local_runner(),
             )
+            atexit.register(self._proxy_mgr.stop)
         return self._proxy_mgr
 
     @property
     def bridge(self) -> FederatedFabricBridge:
         if self._bridge is None:
-            self._bridge = FederatedFabricBridge(self.grid, self.store, self.data_dir())
+            self._bridge = FederatedFabricBridge(
+                self.grid,
+                self.store,
+                self.data_dir(),
+                allow_local_upstream=self.allow_local_upstream(),
+            )
         return self._bridge
 
     @property
@@ -187,16 +212,30 @@ class OmniFabricPluginRuntime:
             self._portable_engine = PortableCartridgeAndOneShotEngine(self.grid)
         return self._portable_engine
 
+    @property
+    def wasm_wgsl_compiler(self) -> WasmWgslKernelCompiler:
+        if self._wasm_wgsl_compiler is None:
+            self._wasm_wgsl_compiler = WasmWgslKernelCompiler(self.grid)
+        return self._wasm_wgsl_compiler
+
+    @property
+    def dp_merge_engine(self) -> DpNullspaceWoodburyEngine:
+        if self._dp_merge_engine is None:
+            self._dp_merge_engine = DpNullspaceWoodburyEngine(self.grid)
+        return self._dp_merge_engine
+
 
 def register(ctx: Any) -> None:
     """Entry point invoked by Hermes PluginManager."""
     rt = OmniFabricPluginRuntime(ctx)
+    atexit.register(rt.stop_proxy)
 
-    # ── 1. Fifteen Unified Tools ──────────────────────────────────────────
+    # ── 1. Seventeen Unified Tools ────────────────────────────────────────
 
     def _tool_probe_and_configure(args: Dict[str, Any], **_kw: Any) -> str:
         requested = args.get("setup_profile")
         if requested:
+            rt.stop_proxy()
             rt._override_profile = str(requested)
             rt._store = None
             rt._boil_engine = None
@@ -206,6 +245,8 @@ def register(ctx: Any) -> None:
             rt._attribution_engine = None
             rt._koopman_engine = None
             rt._portable_engine = None
+            rt._wasm_wgsl_compiler = None
+            rt._dp_merge_engine = None
             rt._proxy_mgr = None
             rt._bridge = None
         if args.get("budget_cap_micro_units") is not None:
@@ -787,7 +828,7 @@ def register(ctx: Any) -> None:
 
     def _tool_federated_sync(args: Dict[str, Any], **_kw: Any) -> str:
         action = str(args.get("action") or "pulse")
-        endpoint = str(args.get("upstream_endpoint") or rt.upstream_endpoint())
+        endpoint = rt.upstream_endpoint()
         if action == "pull_unseen":
             res = rt.bridge.pull_unseen_frontier(
                 base_url=endpoint,
@@ -809,15 +850,14 @@ def register(ctx: Any) -> None:
     ctx.register_tool(
         name="fabric_federated_sync",
         toolset="omni_fabric_runtime",
-        description="Selective bidirectional sync (pulse, pull_unseen, push_promoted, remote_mcp) with a configured upstream Fabric endpoint while keeping local_only data private.",
+        description="Selective bidirectional sync (pulse, pull_unseen, push_promoted, remote_mcp) with the owner-configured upstream Fabric endpoint while keeping local_only data private.",
         schema={
             "name": "fabric_federated_sync",
-            "description": "Check pulse, pull unseen frontier tasks, push sync_ready promoted objects, or invoke upstream MCP tools.",
+            "description": "Check pulse, pull unseen frontier tasks, push sync_ready promoted objects, or invoke upstream MCP tools on the owner-configured upstream_endpoint.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["pulse", "pull_unseen", "push_promoted", "remote_mcp"]},
-                    "upstream_endpoint": {"type": "string"},
                     "worker_id": {"type": "string"},
                     "query": {"type": "string"},
                     "tool_name": {"type": "string"},
@@ -1228,6 +1268,92 @@ def register(ctx: Any) -> None:
         handler=_tool_export_portable,
     )
 
+    def _tool_compile_wasm_wgsl(args: Dict[str, Any], **_kw: Any) -> str:
+        w1 = args.get("w1") if args.get("w1") is not None else args.get("weights")
+        b1 = args.get("b1") if args.get("b1") is not None else args.get("bias")
+        res = rt.wasm_wgsl_compiler.compile_kernel(
+            cartridge_id=str(args.get("cartridge_id") or "cartridge_kernel"),
+            w1=w1,
+            b1=b1,
+            w2=args.get("w2"),
+            b2=args.get("b2"),
+            activation=str(args.get("activation") or "relu"),
+            workgroup_size=args.get("workgroup_size"),
+            test_vectors=args.get("test_vectors"),
+            regime=rt.active_regime(),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_compile_wasm_wgsl_kernel",
+        toolset="omni_fabric_runtime",
+        description="Compile any 1-layer (W1, b1) or 2-layer (W1, b1, W2, b2) IEEE-754 float32 weight cartridge strictly in memory into WebAssembly v1 bytecode (wasm_base64), .wat text, and @compute @workgroup_size WebGPU .wgsl shader source.",
+        schema={
+            "name": "fabric_compile_wasm_wgsl_kernel",
+            "description": "In-memory IEEE-754 WebAssembly v1 (.wasm / .wat) and WebGPU (.wgsl) compiler with zero binary files written to disk.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "cartridge_id": {"type": "string"},
+                    "w1": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "b1": {"type": "array", "items": {"type": "number"}},
+                    "w2": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "b2": {"type": "array", "items": {"type": "number"}},
+                    "weights": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "bias": {"type": "array", "items": {"type": "number"}},
+                    "activation": {"type": "string", "enum": ["linear", "relu", "relu_both"]},
+                    "workgroup_size": {"type": "integer"},
+                    "test_vectors": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                },
+            },
+        },
+        handler=_tool_compile_wasm_wgsl,
+    )
+
+    def _tool_dp_federated_merge(args: Dict[str, Any], **_kw: Any) -> str:
+        res = rt.dp_merge_engine.merge_or_predict(
+            namespace=str(args.get("namespace") or "dp_swarm"),
+            action=str(args.get("action") or "merge"),
+            anchor_vectors=args.get("anchor_vectors"),
+            worker_updates=args.get("worker_updates"),
+            base_weights=args.get("base_weights"),
+            epsilon=args.get("epsilon"),
+            delta=args.get("delta"),
+            clip_norm=args.get("clip_norm"),
+            noise_seed=args.get("noise_seed"),
+            vector=args.get("vector"),
+            class_labels=args.get("class_labels"),
+            regime=rt.active_regime(),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_dp_federated_merge",
+        toolset="omni_fabric_runtime",
+        description="Execute (epsilon, delta)-DP L2-clipped Gaussian Recursive Woodbury weight fusion strictly inside Null(W_anchor) with 0.0 anchor drift and 0 raw record transfers.",
+        schema={
+            "name": "fabric_dp_federated_merge",
+            "description": "Differentially private nullspace Woodbury federated merge, zero-token prediction, or cumulative privacy budget ledger lookup.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["merge", "predict", "ledger"]},
+                    "namespace": {"type": "string"},
+                    "anchor_vectors": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "worker_updates": {"type": "array", "items": {"type": "object"}},
+                    "base_weights": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "epsilon": {"type": "number"},
+                    "delta": {"type": "number"},
+                    "clip_norm": {"type": "number"},
+                    "noise_seed": {"type": "integer"},
+                    "vector": {"type": "array", "items": {"type": "number"}},
+                    "class_labels": {"type": "array", "items": {"type": "string"}},
+                },
+            },
+        },
+        handler=_tool_dp_federated_merge,
+    )
+
     # ── 2. LLM Request Middleware ─────────────────────────────────────────
 
     def _llm_request_middleware(request: Dict[str, Any], **_kw: Any) -> Optional[Dict[str, Any]]:
@@ -1326,7 +1452,7 @@ def register(ctx: Any) -> None:
         st = rt.store.summarize_status()
         px = rt.proxy_mgr.status()
         return (
-            f"omni-fabric-runtime v0.5.0 profile={env['selected_profile']} "
+            f"omni-fabric-runtime v0.6.0 profile={env['selected_profile']} "
             f"tasks={st['tasks_by_status']} halted={st['halted_tasks']} "
             f"promoted={st['promoted_objects']} envelopes={st['trace_envelopes']} "
             f"routers={len(rt.boil_engine.compiled_routers)} "
@@ -1338,6 +1464,7 @@ def register(ctx: Any) -> None:
         chosen = raw.strip() or "auto"
         if chosen not in ("auto", *SETUP_PROFILES):
             return f"Unknown profile '{chosen}'. Valid: auto, {', '.join(SETUP_PROFILES)}"
+        rt.stop_proxy()
         rt._override_profile = chosen
         rt._store = None
         rt._boil_engine = None
@@ -1347,6 +1474,10 @@ def register(ctx: Any) -> None:
         rt._attribution_engine = None
         rt._koopman_engine = None
         rt._portable_engine = None
+        rt._wasm_wgsl_compiler = None
+        rt._dp_merge_engine = None
+        rt._proxy_mgr = None
+        rt._bridge = None
         env = rt.resolve_environment(allow_socket_probe=False)
         return f"Switched setup_profile -> {env['selected_profile']} (requested={chosen})"
 
