@@ -1,9 +1,9 @@
 manifest_version: 2
 api_version: 1
 name: omni-fabric-runtime
-version: "0.4.0"
+version: "0.5.0"
 kind: standalone
-description: "Environment-adaptive agent fabric runtime: SQLite WAL monotonic lease queue, affinity bundle dispatch, enriched trace envelopes, distinct maker!=checker object cache with FTS5 RRF search, 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon check-gated DAG decomposer, leak-free holdout recursive RL trial engine, and OpenAI-v1 loopback swarm proxy."
+description: "Environment-adaptive agent fabric runtime: SQLite WAL monotonic lease queue, affinity bundle dispatch, enriched trace envelopes, distinct maker!=checker object cache with FTS5 RRF search, 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon check-gated DAG decomposer, leak-free holdout recursive RL trial engine, topic-nullspace generator attribution, zero-token Koopman + CEGAR trajectory planner, 5-target portable cartridge exporter with Hopfield/Woodbury 1-shot updates, and OpenAI-v1 loopback swarm proxy."
 author: "aidonerightcorp"
 license: "MIT"
 homepage: "https://github.com/aidonerightcorp/omni-fabric-runtime"
@@ -23,6 +23,9 @@ provides_tools:
   - fabric_compile_weight_unit
   - fabric_decompose_horizon
   - fabric_recursive_trial
+  - fabric_attribute_generator_profile
+  - fabric_plan_koopman_trajectory
+  - fabric_export_portable_cartridge
 provides_hooks:
   - on_session_start
   - pre_llm_call

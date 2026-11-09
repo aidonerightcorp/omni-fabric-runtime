@@ -1,6 +1,6 @@
 {
   "grid_id": "omni_fabric_adaptive_grid",
-  "generation": 3,
+  "generation": 4,
   "default_regime": "balanced_adaptive",
   "axes": [
     {
@@ -160,6 +160,41 @@
       "low": 20,
       "high": 200,
       "step": 20
+    },
+    {
+      "name": "attribution_sketch_dim",
+      "kind": "integer_range",
+      "low": 16,
+      "high": 64,
+      "step": 16
+    },
+    {
+      "name": "topic_nullspace_rank",
+      "kind": "integer_range",
+      "low": 2,
+      "high": 16,
+      "step": 2
+    },
+    {
+      "name": "koopman_lifted_dim",
+      "kind": "integer_range",
+      "low": 8,
+      "high": 48,
+      "step": 8
+    },
+    {
+      "name": "koopman_lookahead_depth",
+      "kind": "integer_range",
+      "low": 2,
+      "high": 8,
+      "step": 1
+    },
+    {
+      "name": "hopfield_inverse_temp_beta",
+      "kind": "integer_range",
+      "low": 4,
+      "high": 24,
+      "step": 4
     }
   ],
   "constraints": [
@@ -172,6 +207,11 @@
       "left": "checkpoint_cadence_steps",
       "op": "le",
       "right": "horizon_max_steps"
+    },
+    {
+      "left": "topic_nullspace_rank",
+      "op": "le",
+      "right": "attribution_sketch_dim"
     }
   ],
   "regimes": {
@@ -197,7 +237,12 @@
       "horizon_max_steps": 24,
       "checkpoint_cadence_steps": 2,
       "memory_lora_max_slots": 8,
-      "policy_gradient_step_milli": 60
+      "policy_gradient_step_milli": 60,
+      "attribution_sketch_dim": 16,
+      "topic_nullspace_rank": 4,
+      "koopman_lifted_dim": 16,
+      "koopman_lookahead_depth": 3,
+      "hopfield_inverse_temp_beta": 8
     },
     "balanced_adaptive": {
       "lease_ttl_seconds": 180,
@@ -221,7 +266,12 @@
       "horizon_max_steps": 48,
       "checkpoint_cadence_steps": 3,
       "memory_lora_max_slots": 16,
-      "policy_gradient_step_milli": 100
+      "policy_gradient_step_milli": 100,
+      "attribution_sketch_dim": 32,
+      "topic_nullspace_rank": 6,
+      "koopman_lifted_dim": 24,
+      "koopman_lookahead_depth": 4,
+      "hopfield_inverse_temp_beta": 12
     },
     "deep_swarm_campaign": {
       "lease_ttl_seconds": 360,
@@ -245,7 +295,12 @@
       "horizon_max_steps": 96,
       "checkpoint_cadence_steps": 4,
       "memory_lora_max_slots": 32,
-      "policy_gradient_step_milli": 140
+      "policy_gradient_step_milli": 140,
+      "attribution_sketch_dim": 48,
+      "topic_nullspace_rank": 8,
+      "koopman_lifted_dim": 32,
+      "koopman_lookahead_depth": 6,
+      "hopfield_inverse_temp_beta": 16
     }
   },
   "runtime_constants": {
@@ -336,6 +391,18 @@
     "person_step_confidence_milli": 940,
     "machine_step_confidence_milli": 920,
     "swarm_step_confidence_milli": 965,
-    "checked_save_reset_milli": 1000
+    "checked_save_reset_milli": 1000,
+    "conformal_spoof_quantile_permille": 960,
+    "spoof_residual_scale": 1.5,
+    "inlier_subspace_rank_default": 4,
+    "koopman_beam_width": 4,
+    "koopman_step_penalty": 0.02,
+    "cegar_query_budget_default": 6,
+    "cegar_margin_floor": 0.25,
+    "portable_discrepancy_ceiling": 0.00001,
+    "hopfield_novelty_energy_threshold": 0.35,
+    "woodbury_init_precision_scale": 20.0,
+    "c99_float_digits": 8,
+    "structural_moment_slots": 6
   }
 }

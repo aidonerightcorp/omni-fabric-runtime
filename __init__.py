@@ -1,10 +1,10 @@
-"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.4.0).
+"""Hermes Agent unified adaptive plugin: omni-fabric-runtime (v0.5.0).
 
 Packages the complete local-to-federated agent fabric runtime behind 5 automatic
 environment setup profiles:
-1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon DAGs, and leak-free recursive RL trials
-2. local_neural         - Unlocks NumPy/PyTorch multi-head micro-nets, 0-epoch SVD nullspace surgery, and Wanda trace channel pruning
-3. local_runner_swarm   - Unlocks loopback /v1/models + /v1/chat/completions + /swarm/* distilling proxy for Hermes subagents and GrokBot workers
+1. stdlib_airgap        - Pure Python stdlib + SQLite WAL/FTS5 (0 pip packages, 0 network), 6-stage weight-space compiler across 6 model classes, Actor x {Transfer, Transform, Save} x Horizon DAGs, leak-free recursive RL trials, topic-nullspace attribution, Koopman + CEGAR planning, and 5-target portable Hopfield/Woodbury cartridges
+2. local_neural         - Enables NumPy/PyTorch multi-head micro-nets, 0-epoch SVD nullspace surgery, and Wanda trace channel pruning
+3. local_runner_swarm   - Enables loopback /v1/models + /v1/chat/completions + /swarm/* distilling proxy for Hermes subagents and GrokBot workers
 4. hybrid_fabric_sync   - Local SQLite WAL cell + selective sync of sync_ready objects & frontier tasks with upstream_endpoint
 5. thin_remote_client   - Ephemeral zero-disk container bridge to upstream_endpoint (/q/* and /mcp)
 """
@@ -30,6 +30,12 @@ from .grid_and_env import (
     AdaptiveNodeGrid,
     EffortAndBudgetGate,
     EnvironmentCapabilityProbe,
+)
+from .nextgen_and_portable import (
+    PORTABLE_TARGETS,
+    KoopmanCegarTrajectoryEngine,
+    PortableCartridgeAndOneShotEngine,
+    TopicNullspaceAttributionEngine,
 )
 from .weight_pipeline import (
     ACTOR_MODES,
@@ -57,6 +63,9 @@ class OmniFabricPluginRuntime:
         self._weight_pipeline: Optional[SixStageWeightPipelineEngine] = None
         self._horizon_decomposer: Optional[HorizonTriadDecomposer] = None
         self._recursive_trial: Optional[RecursiveHoldoutTrialEngine] = None
+        self._attribution_engine: Optional[TopicNullspaceAttributionEngine] = None
+        self._koopman_engine: Optional[KoopmanCegarTrajectoryEngine] = None
+        self._portable_engine: Optional[PortableCartridgeAndOneShotEngine] = None
         self._proxy_mgr: Optional[LoopbackSwarmProxyManager] = None
         self._bridge: Optional[FederatedFabricBridge] = None
         self._override_profile: Optional[str] = None
@@ -160,12 +169,30 @@ class OmniFabricPluginRuntime:
             self._recursive_trial = RecursiveHoldoutTrialEngine(self.grid, self.store)
         return self._recursive_trial
 
+    @property
+    def attribution_engine(self) -> TopicNullspaceAttributionEngine:
+        if self._attribution_engine is None:
+            self._attribution_engine = TopicNullspaceAttributionEngine(self.grid)
+        return self._attribution_engine
+
+    @property
+    def koopman_engine(self) -> KoopmanCegarTrajectoryEngine:
+        if self._koopman_engine is None:
+            self._koopman_engine = KoopmanCegarTrajectoryEngine(self.grid)
+        return self._koopman_engine
+
+    @property
+    def portable_engine(self) -> PortableCartridgeAndOneShotEngine:
+        if self._portable_engine is None:
+            self._portable_engine = PortableCartridgeAndOneShotEngine(self.grid)
+        return self._portable_engine
+
 
 def register(ctx: Any) -> None:
     """Entry point invoked by Hermes PluginManager."""
     rt = OmniFabricPluginRuntime(ctx)
 
-    # ── 1. Twelve Unified Tools ───────────────────────────────────────────
+    # ── 1. Fifteen Unified Tools ──────────────────────────────────────────
 
     def _tool_probe_and_configure(args: Dict[str, Any], **_kw: Any) -> str:
         requested = args.get("setup_profile")
@@ -176,6 +203,9 @@ def register(ctx: Any) -> None:
             rt._weight_pipeline = None
             rt._horizon_decomposer = None
             rt._recursive_trial = None
+            rt._attribution_engine = None
+            rt._koopman_engine = None
+            rt._portable_engine = None
             rt._proxy_mgr = None
             rt._bridge = None
         if args.get("budget_cap_micro_units") is not None:
@@ -1013,6 +1043,191 @@ def register(ctx: Any) -> None:
         handler=_tool_recursive_trial,
     )
 
+    def _tool_attribute_generator(args: Dict[str, Any], **_kw: Any) -> str:
+        action = str(args.get("action") or "attribute")
+        ns = str(args.get("namespace") or "default_attribution")
+        if action == "compile":
+            res = rt.attribution_engine.compile_attribution_model(
+                namespace=ns,
+                samples=list(args.get("samples") or []),
+                sketch_dim=args.get("sketch_dim"),
+                topic_rank=args.get("topic_rank"),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "inspect":
+            m = rt.attribution_engine.models.get(ns)
+            if m is None:
+                return json.dumps({"ok": False, "error": "attribution_model_not_compiled"}, sort_keys=True)
+            return json.dumps(
+                {
+                    "ok": True,
+                    "namespace": ns,
+                    "profiles": m["profiles"],
+                    "sketch_dim": m["sketch_dim"],
+                    "topic_nullspace_rank": m["topic_nullspace_rank"],
+                    "topic_leakage_norm": m["topic_leakage_norm"],
+                    "seen_accuracy": m["seen_accuracy"],
+                },
+                sort_keys=True,
+            )
+        res = rt.attribution_engine.attribute_text(
+            namespace=ns,
+            text=str(args.get("text") or ""),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_attribute_generator_profile",
+        toolset="omni_fabric_runtime",
+        description="Compile and evaluate topic-nullspace generator attribution W_attr = W_ridge(I - V_topic V_topic^T) with 0.0 topic leakage and conformal spoof screening.",
+        schema={
+            "name": "fabric_attribute_generator_profile",
+            "description": "Attribute passage generator profile invariant to unseen topics and flag hybrid style spoofing.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["compile", "attribute", "inspect"]},
+                    "namespace": {"type": "string"},
+                    "text": {"type": "string"},
+                    "sketch_dim": {"type": "integer"},
+                    "topic_rank": {"type": "integer"},
+                    "samples": {"type": "array", "items": {"type": "object"}},
+                },
+                "required": ["action"],
+            },
+        },
+        handler=_tool_attribute_generator,
+    )
+
+    def _tool_plan_koopman(args: Dict[str, Any], **_kw: Any) -> str:
+        action = str(args.get("action") or "plan")
+        ns = str(args.get("namespace") or "default_koopman")
+        if action == "compile":
+            res = rt.koopman_engine.compile_koopman_planner(
+                namespace=ns,
+                transitions=list(args.get("transitions") or []),
+                goal_state=args.get("goal_state"),
+                lifted_dim=args.get("lifted_dim"),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action == "select_cegar":
+            res = rt.koopman_engine.select_cegar_counterexamples(
+                namespace=ns,
+                candidate_scenarios=list(args.get("candidate_scenarios") or []),
+                query_budget=args.get("query_budget"),
+            )
+            return json.dumps(res, sort_keys=True)
+        res = rt.koopman_engine.plan_trajectory(
+            namespace=ns,
+            initial_state=list(args.get("initial_state") or []),
+            goal_state=args.get("goal_state"),
+            horizon_depth=args.get("horizon_depth"),
+            regime=rt.active_regime(),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_plan_koopman_trajectory",
+        toolset="omni_fabric_runtime",
+        description="Zero-token lifted linear Koopman multi-step tool sequence planner (z_{t+1} = K_a z_t) plus CEGAR boundary counterexample scenario selector.",
+        schema={
+            "name": "fabric_plan_koopman_trajectory",
+            "description": "Compile lifted Koopman tool operators, plan zero-token multi-step trajectories, or select CEGAR counterexamples.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["compile", "plan", "select_cegar"]},
+                    "namespace": {"type": "string"},
+                    "transitions": {"type": "array", "items": {"type": "object"}},
+                    "initial_state": {"type": "array", "items": {"type": "number"}},
+                    "goal_state": {"type": "array", "items": {"type": "number"}},
+                    "lifted_dim": {"type": "integer"},
+                    "horizon_depth": {"type": "integer"},
+                    "candidate_scenarios": {"type": "array", "items": {"type": "object"}},
+                    "query_budget": {"type": "integer"},
+                },
+                "required": ["action"],
+            },
+        },
+        handler=_tool_plan_koopman,
+    )
+
+    def _tool_export_portable(args: Dict[str, Any], **_kw: Any) -> str:
+        action = str(args.get("action") or "export")
+        ns = str(args.get("namespace") or "default_portable")
+        if action in ("hopfield_write", "hopfield_query"):
+            mode = "write" if action == "hopfield_write" else "query"
+            res = rt.portable_engine.hopfield_oneshot_step(
+                namespace=ns,
+                mode=mode,
+                vector=list(args.get("vector") or []),
+                label=str(args.get("label") or "pattern_default"),
+                cartridge_id=str(args.get("cartridge_id") or "cartridge_default"),
+                beta=args.get("beta"),
+                regime=rt.active_regime(),
+            )
+            return json.dumps(res, sort_keys=True)
+        if action in ("woodbury_update", "woodbury_predict"):
+            mode = "update" if action == "woodbury_update" else "predict"
+            res = rt.portable_engine.woodbury_multishot_step(
+                namespace=ns,
+                mode=mode,
+                vector=list(args.get("vector") or []),
+                target_label=str(args.get("target_label") or ""),
+                class_labels=args.get("class_labels"),
+            )
+            return json.dumps(res, sort_keys=True)
+        res = rt.portable_engine.export_portable_cartridge(
+            cartridge_id=str(args.get("cartridge_id") or ns),
+            weights=list(args.get("weights") or []),
+            bias=args.get("bias"),
+            targets=args.get("targets"),
+            activation=str(args.get("activation") or "linear"),
+            test_vectors=args.get("test_vectors"),
+        )
+        return json.dumps(res, sort_keys=True)
+
+    ctx.register_tool(
+        name="fabric_export_portable_cartridge",
+        toolset="omni_fabric_runtime",
+        description="Export any 8x8 or linear float32 weight cartridge to js, python, sql, c99, or safetensors and run Modern Hopfield 1-shot or Recursive Woodbury multi-shot updates.",
+        schema={
+            "name": "fabric_export_portable_cartridge",
+            "description": "Export IEEE-754 float32 cartridges across 5 runtimes or execute 0-epoch Hopfield/Woodbury weight updates.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "export",
+                            "hopfield_write",
+                            "hopfield_query",
+                            "woodbury_update",
+                            "woodbury_predict",
+                        ],
+                    },
+                    "namespace": {"type": "string"},
+                    "cartridge_id": {"type": "string"},
+                    "weights": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "bias": {"type": "array", "items": {"type": "number"}},
+                    "targets": {"type": "array", "items": {"type": "string", "enum": list(PORTABLE_TARGETS)}},
+                    "activation": {"type": "string", "enum": ["linear", "relu"]},
+                    "test_vectors": {"type": "array", "items": {"type": "array", "items": {"type": "number"}}},
+                    "vector": {"type": "array", "items": {"type": "number"}},
+                    "label": {"type": "string"},
+                    "target_label": {"type": "string"},
+                    "class_labels": {"type": "array", "items": {"type": "string"}},
+                    "beta": {"type": "integer"},
+                },
+                "required": ["action"],
+            },
+        },
+        handler=_tool_export_portable,
+    )
+
     # ── 2. LLM Request Middleware ─────────────────────────────────────────
 
     def _llm_request_middleware(request: Dict[str, Any], **_kw: Any) -> Optional[Dict[str, Any]]:
@@ -1111,7 +1326,7 @@ def register(ctx: Any) -> None:
         st = rt.store.summarize_status()
         px = rt.proxy_mgr.status()
         return (
-            f"omni-fabric-runtime v0.4.0 profile={env['selected_profile']} "
+            f"omni-fabric-runtime v0.5.0 profile={env['selected_profile']} "
             f"tasks={st['tasks_by_status']} halted={st['halted_tasks']} "
             f"promoted={st['promoted_objects']} envelopes={st['trace_envelopes']} "
             f"routers={len(rt.boil_engine.compiled_routers)} "
@@ -1129,6 +1344,9 @@ def register(ctx: Any) -> None:
         rt._weight_pipeline = None
         rt._horizon_decomposer = None
         rt._recursive_trial = None
+        rt._attribution_engine = None
+        rt._koopman_engine = None
+        rt._portable_engine = None
         env = rt.resolve_environment(allow_socket_probe=False)
         return f"Switched setup_profile -> {env['selected_profile']} (requested={chosen})"
 
